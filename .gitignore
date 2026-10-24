@@ -23,3 +23,6 @@ vendor/
 .idea/
 .vscode/
 .DS_Store
+
+# Local object databases (recreate with make seed)
+/data/
