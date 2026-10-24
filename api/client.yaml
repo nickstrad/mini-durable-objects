@@ -1,0 +1,4 @@
+package: apiclient
+generate:
+  models: true
+  client: true

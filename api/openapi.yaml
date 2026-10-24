@@ -1,0 +1,143 @@
+openapi: 3.0.3
+info:
+  title: Mini Durable Objects API
+  version: 0.1.0
+  description: Create objects, then read, claim, and finish their tasks. Each object has its own SQLite database.
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /objects/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ObjectID'
+    get:
+      operationId: getState
+      summary: Read an existing object's task status
+      responses:
+        '200':
+          description: Current task state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectState'
+        '400':
+          $ref: '#/components/responses/InvalidID'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      operationId: createObject
+      summary: Create an object with a pending task
+      description: Creates the object's database if needed. An existing object keeps its status.
+      responses:
+        '200':
+          description: Current task state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectState'
+        '400':
+          $ref: '#/components/responses/InvalidID'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /objects/{id}/claim:
+    parameters:
+      - $ref: '#/components/parameters/ObjectID'
+    post:
+      operationId: claimTask
+      summary: Atomically claim a pending task
+      description: Changes pending to running. Returns claimed=false if the task is already running or completed.
+      responses:
+        '200':
+          description: Claim result; only one competing request can return claimed=true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResult'
+        '400':
+          $ref: '#/components/responses/InvalidID'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /objects/{id}/finish:
+    parameters:
+      - $ref: '#/components/parameters/ObjectID'
+    post:
+      operationId: finishTask
+      summary: Complete a running task and record its completion event atomically
+      parameters:
+        - name: fail
+          in: query
+          description: Set true to simulate failure before commit; both changes roll back.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Completed task state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectState'
+        '400':
+          $ref: '#/components/responses/InvalidID'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Task is not running
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  parameters:
+    ObjectID:
+      name: id
+      in: path
+      required: true
+      description: Object's filesystem identity
+      schema:
+        type: string
+        pattern: '^[a-z0-9][a-z0-9-]{0,39}$'
+        minLength: 1
+        maxLength: 40
+  schemas:
+    ObjectState:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed]
+    ClaimResult:
+      type: object
+      required: [id, claimed]
+      properties:
+        id:
+          type: string
+        claimed:
+          type: boolean
+  responses:
+    InvalidID:
+      description: Invalid object ID
+      content:
+        text/plain:
+          schema:
+            type: string
+    NotFound:
+      description: Object database does not exist
+      content:
+        text/plain:
+          schema:
+            type: string
+    InternalError:
+      description: Storage or database failure, or simulated failure during finish
+      content:
+        text/plain:
+          schema:
+            type: string
