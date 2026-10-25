@@ -8,7 +8,7 @@ import (
 
 func TestSQLiteStore(t *testing.T) {
 	ctx := context.Background()
-	var s Store = SQLite{Dir: t.TempDir()}
+	var s Store = NewSQLite(t.TempDir())
 
 	if _, err := s.Create(ctx, "BAD"); !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("create invalid: %v", err)

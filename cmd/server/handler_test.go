@@ -15,7 +15,7 @@ import (
 func testObject(t *testing.T) (http.Handler, *sql.DB) {
 	t.Helper()
 	dir := t.TempDir()
-	h := newRouter(store.SQLite{Dir: dir})
+	h := newRouter(store.NewSQLite(dir))
 	if w := request(h, "POST", "/objects/task-alpha"); w.Code != 200 {
 		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
 	}

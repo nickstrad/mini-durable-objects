@@ -6,21 +6,32 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// SQLite stores each object in its own database at <Dir>/<id>/state.sqlite.
-type SQLite struct{ Dir string }
+// SQLite stores each object in its own database at <dir>/<id>/state.sqlite.
+// Open databases stay in a registry until they sit idle.
+type SQLite struct {
+	dir     string
+	objects *registry
+}
 
 var _ Store = SQLite{}
+
+const idleTimeout = 3 * time.Second
+
+func NewSQLite(dir string) SQLite {
+	return SQLite{dir: dir, objects: newRegistry(idleTimeout)}
+}
 
 // Lesson 1 path convention: each object ID maps to its own directory.
 func (s SQLite) path(id string) (string, error) {
 	if !validID.MatchString(id) {
 		return "", ErrInvalidID
 	}
-	return filepath.Join(s.Dir, id, "state.sqlite"), nil
+	return filepath.Join(s.dir, id, "state.sqlite"), nil
 }
 
 func openDB(path string) (*sql.DB, error) {
@@ -32,18 +43,18 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// open opens an existing object's database.
-func (s SQLite) open(id string) (*sql.DB, error) {
+// open returns an existing object's database. Call release when done.
+func (s SQLite) open(id string) (db *sql.DB, release func(), err error) {
 	path, err := s.path(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return openDB(path)
+	return s.objects.acquire(id, path)
 }
 
 func (s SQLite) Create(ctx context.Context, id string) (string, error) {
@@ -54,11 +65,11 @@ func (s SQLite) Create(ctx context.Context, id string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return "", err
 	}
-	db, err := openDB(path)
+	db, release, err := s.objects.acquire(id, path)
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
+	defer release()
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS task (
 			id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -83,20 +94,20 @@ func readStatus(ctx context.Context, db *sql.DB) (string, error) {
 }
 
 func (s SQLite) State(ctx context.Context, id string) (string, error) {
-	db, err := s.open(id)
+	db, release, err := s.open(id)
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
+	defer release()
 	return readStatus(ctx, db)
 }
 
 func (s SQLite) Claim(ctx context.Context, id string) (bool, error) {
-	db, err := s.open(id)
+	db, release, err := s.open(id)
 	if err != nil {
 		return false, err
 	}
-	defer db.Close()
+	defer release()
 	// Pin BEGIN, UPDATE, and COMMIT to one SQLite connection.
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -132,11 +143,11 @@ func (s SQLite) Claim(ctx context.Context, id string) (bool, error) {
 }
 
 func (s SQLite) Finish(ctx context.Context, id string, failBeforeCommit bool) error {
-	db, err := s.open(id)
+	db, release, err := s.open(id)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer release()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
