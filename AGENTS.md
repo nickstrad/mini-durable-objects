@@ -37,3 +37,14 @@ keep changes small and in scope.
 
 - Run `make check` (gofmt, `go vet`, and `make test`) before finishing any change.
 - Standard library only, unless a lesson calls for a dependency (e.g. SQLite in lesson 2).
+
+## Validation and scripts
+
+- Before validating or testing a change, read `agent_work/validation/index.md` and reuse the
+  scripts there (e.g. mutation testing, flakiness loops) instead of writing a custom one.
+- Put one-off scripts in `agent_work/validation/` too, and add a line for each to `index.md`:
+  what it does and the exact command to run it.
+- Scripting languages: Go for anything non-trivial, bash for basic terminal work (copying,
+  looping over `go test`). No Python.
+- Scripts must work on a temporary copy of the repo, never mutate the working tree, and still
+  pass `make check`.

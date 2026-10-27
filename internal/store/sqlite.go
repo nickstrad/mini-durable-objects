@@ -12,10 +12,10 @@ import (
 )
 
 // SQLite stores each object in its own database at <dir>/<id>/state.sqlite.
-// Open databases stay in a registry until they sit idle.
+// Each open database is owned by its object's goroutine until it sits idle.
 type SQLite struct {
 	dir     string
-	objects *registry
+	objects *registry[*sql.DB]
 }
 
 var _ Store = SQLite{}
@@ -23,7 +23,7 @@ var _ Store = SQLite{}
 const idleTimeout = 3 * time.Second
 
 func NewSQLite(dir string) SQLite {
-	return SQLite{dir: dir, objects: newRegistry(idleTimeout)}
+	return SQLite{dir: dir, objects: newRegistry(idleTimeout, openDB)}
 }
 
 // Lesson 1 path convention: each object ID maps to its own directory.
@@ -43,18 +43,18 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// open returns an existing object's database. Call release when done.
-func (s SQLite) open(id string) (db *sql.DB, release func(), err error) {
+// do runs fn with an existing object's database on the object's goroutine.
+func (s SQLite) do(ctx context.Context, id string, fn func(*sql.DB) error) error {
 	path, err := s.path(id)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, nil, ErrNotFound
+		return ErrNotFound
 	} else if err != nil {
-		return nil, nil, err
+		return err
 	}
-	return s.objects.acquire(id, path)
+	return s.objects.do(ctx, id, path, fn)
 }
 
 func (s SQLite) Create(ctx context.Context, id string) (string, error) {
@@ -65,26 +65,26 @@ func (s SQLite) Create(ctx context.Context, id string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return "", err
 	}
-	db, release, err := s.objects.acquire(id, path)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-	_, err = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS task (
-			id INTEGER PRIMARY KEY CHECK(id = 1),
-			status TEXT NOT NULL DEFAULT 'pending'
-		);
-		INSERT OR IGNORE INTO task(id) VALUES(1);
-		CREATE TABLE IF NOT EXISTS events (
-			id INTEGER PRIMARY KEY,
-			kind TEXT NOT NULL
-		)
-	`)
-	if err != nil {
-		return "", err
-	}
-	return readStatus(ctx, db)
+	var status string
+	err = s.objects.do(ctx, id, path, func(db *sql.DB) error {
+		_, err := db.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS task (
+				id INTEGER PRIMARY KEY CHECK(id = 1),
+				status TEXT NOT NULL DEFAULT 'pending'
+			);
+			INSERT OR IGNORE INTO task(id) VALUES(1);
+			CREATE TABLE IF NOT EXISTS events (
+				id INTEGER PRIMARY KEY,
+				kind TEXT NOT NULL
+			)
+		`)
+		if err != nil {
+			return err
+		}
+		status, err = readStatus(ctx, db)
+		return err
+	})
+	return status, err
 }
 
 func readStatus(ctx context.Context, db *sql.DB) (string, error) {
@@ -94,81 +94,79 @@ func readStatus(ctx context.Context, db *sql.DB) (string, error) {
 }
 
 func (s SQLite) State(ctx context.Context, id string) (string, error) {
-	db, release, err := s.open(id)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-	return readStatus(ctx, db)
+	var status string
+	err := s.do(ctx, id, func(db *sql.DB) error {
+		var err error
+		status, err = readStatus(ctx, db)
+		return err
+	})
+	return status, err
 }
 
 func (s SQLite) Claim(ctx context.Context, id string) (bool, error) {
-	db, release, err := s.open(id)
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	// Pin BEGIN, UPDATE, and COMMIT to one SQLite connection.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=2000"); err != nil {
-		return false, err
-	}
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return false, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			// Rollback must still run if the request was canceled.
-			conn.ExecContext(context.Background(), "ROLLBACK")
+	var claimed bool
+	err := s.do(ctx, id, func(db *sql.DB) error {
+		// Pin BEGIN, UPDATE, and COMMIT to one SQLite connection.
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return err
 		}
-	}()
-	result, err := conn.ExecContext(ctx, "UPDATE task SET status='running' WHERE id=1 AND status='pending'")
-	if err != nil {
-		return false, err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return false, err
-	}
-	committed = true
-	return affected == 1, nil
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=2000"); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				// Rollback must still run if the request was canceled.
+				conn.ExecContext(context.Background(), "ROLLBACK")
+			}
+		}()
+		result, err := conn.ExecContext(ctx, "UPDATE task SET status='running' WHERE id=1 AND status='pending'")
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return err
+		}
+		committed = true
+		claimed = affected == 1
+		return nil
+	})
+	return claimed, err
 }
 
 func (s SQLite) Finish(ctx context.Context, id string, failBeforeCommit bool) error {
-	db, release, err := s.open(id)
-	if err != nil {
-		return err
-	}
-	defer release()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, "UPDATE task SET status='completed' WHERE id=1 AND status='running'")
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected != 1 {
-		return ErrNotRunning
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO events(kind) VALUES('completed')"); err != nil {
-		return err
-	}
-	if failBeforeCommit {
-		return ErrSimulatedFailure
-	}
-	return tx.Commit()
+	return s.do(ctx, id, func(db *sql.DB) error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(ctx, "UPDATE task SET status='completed' WHERE id=1 AND status='running'")
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return ErrNotRunning
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO events(kind) VALUES('completed')"); err != nil {
+			return err
+		}
+		if failBeforeCommit {
+			return ErrSimulatedFailure
+		}
+		return tx.Commit()
+	})
 }
