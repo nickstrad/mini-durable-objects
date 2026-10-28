@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/nickstrad/mini-durable-objects/internal/errs"
 )
 
 // registry keeps each object's resource (its database, for SQLite) open
@@ -61,12 +64,25 @@ func (r *registry[R]) do(ctx context.Context, id, path string, fn func(R) error)
 	// Buffered so the object's goroutine never waits on the reply.
 	result := make(chan error, 1)
 	select {
-	case obj.inbox <- func(res R) { result <- fn(res) }:
+	case obj.inbox <- func(res R) { result <- call(fn, res) }:
 	case <-ctx.Done():
 		// Canceled while waiting in line; the object never received fn.
 		return ctx.Err()
 	}
 	return <-result
+}
+
+// call runs fn. A panic in fn becomes an Internal error with the panic's stack,
+// so one bad request does not stop the process or the object's goroutine.
+// The wrap happens here, inside the recover, only so the stack shows the
+// panicking frames; wrapErr sets the Op and Message the client sees.
+func call[R any](fn func(R) error, res R) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = errs.Wrap(fmt.Errorf("panic: %v", p), errs.Internal, "store.registry", "storage error")
+		}
+	}()
+	return fn(res)
 }
 
 // acquire returns id's object, activating it if needed. Call release when done

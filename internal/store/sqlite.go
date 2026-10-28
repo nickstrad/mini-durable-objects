@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,7 +27,7 @@ func NewSQLite(dir string, idleTimeout time.Duration) SQLite {
 // path maps each object ID to its own directory.
 func (s SQLite) path(id string) (string, error) {
 	if !validID.MatchString(id) {
-		return "", ErrInvalidID
+		return "", errInvalidID
 	}
 	return filepath.Join(s.dir, id, "state.sqlite"), nil
 }
@@ -38,20 +39,24 @@ func (s SQLite) do(ctx context.Context, id string, fn func(*objectDB) error) err
 		return err
 	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return ErrNotFound
+		return errNotFound
 	} else if err != nil {
-		return err
+		return fmt.Errorf("stat %s: %w", path, err)
 	}
 	return s.objects.do(ctx, id, path, fn)
 }
 
 func (s SQLite) Create(ctx context.Context, id string) error {
+	return wrapErr("store.Create", id, s.create(ctx, id))
+}
+
+func (s SQLite) create(ctx context.Context, id string) error {
 	path, err := s.path(id)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
+		return fmt.Errorf("create dir: %w", err)
 	}
 	// Connecting creates the database file if it does not exist yet.
 	return s.objects.do(ctx, id, path, func(db *objectDB) error {

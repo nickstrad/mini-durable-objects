@@ -92,6 +92,11 @@ func (c connector) Connect(context.Context) (driver.Conn, error) { return c.driv
 func (c connector) Driver() driver.Driver                        { return c.driver }
 
 func (s SQLite) Query(ctx context.Context, id, query string, params []any) (QueryResult, error) {
+	out, err := s.query(ctx, id, query, params)
+	return out, wrapErr("store.Query", id, err)
+}
+
+func (s SQLite) query(ctx context.Context, id, query string, params []any) (QueryResult, error) {
 	var out QueryResult
 	err := s.do(ctx, id, func(db *objectDB) error {
 		// The budget starts once the object runs the query, not while it waits in line.
@@ -118,7 +123,7 @@ func runQuery(ctx context.Context, db *objectDB, query string, params []any) (Qu
 
 	rows, err := tx.QueryContext(ctx, query, params...)
 	if err != nil {
-		return out, fmt.Errorf("%w: %v", ErrBadQuery, err)
+		return out, fmt.Errorf("%w: %w", errBadQuery, err)
 	}
 	defer rows.Close()
 	if out.Columns, err = rows.Columns(); err != nil {
@@ -130,7 +135,7 @@ func runQuery(ctx context.Context, db *objectDB, query string, params []any) (Qu
 	targets := make([]any, len(out.Columns))
 	for rows.Next() {
 		if len(out.Rows) == maxQueryRows {
-			return out, fmt.Errorf("%w: result exceeds %d rows; use LIMIT", ErrBadQuery, maxQueryRows)
+			return out, fmt.Errorf("%w: result exceeds %d rows; use LIMIT", errBadQuery, maxQueryRows)
 		}
 		values := make([]any, len(out.Columns))
 		for i := range values {
@@ -142,7 +147,7 @@ func runQuery(ctx context.Context, db *objectDB, query string, params []any) (Qu
 		out.Rows = append(out.Rows, values)
 	}
 	if err := rows.Err(); err != nil {
-		return out, fmt.Errorf("%w: %v", ErrBadQuery, err)
+		return out, fmt.Errorf("%w: %w", errBadQuery, err)
 	}
 	db.checkSQL.Store(false)
 	return out, tx.Commit()

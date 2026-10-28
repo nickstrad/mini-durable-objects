@@ -15,8 +15,16 @@ assume its conventions.
 
 Changes ship with tests or a runnable demo showing them working.
 
+## Writing docs
+
+- Write all docs in this repo in ASD-STE100 Simplified Technical English. The docs are
+  README.md, AGENTS.md, CODING_STYLE.md, and the descriptions in `api/openapi.yaml`.
+- Use the skill in `.claude/skills/asd-ste100/`. To start it, type `/asd-ste100`.
+- This rule does not apply to code or to code comments.
+
 ## Go conventions
 
+- Obey the rules in [CODING_STYLE.md](CODING_STYLE.md). These rules include the error rules.
 - Run `make check` (gofmt, `go vet`, and `make test`) before finishing any change.
 - Prefer the standard library; add a dependency only when it earns its place (current ones:
   mattn/go-sqlite3, which needs cgo; chi; cobra; oapi-codegen).

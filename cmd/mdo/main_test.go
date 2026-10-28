@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/nickstrad/mini-durable-objects/internal/errs"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -62,11 +64,13 @@ func TestCommandFailures(t *testing.T) {
 		code         int
 		body, want   string
 		transportErr error
+		kind         errs.Kind
 	}{
-		{name: "missing", code: 404, body: "object not found\n", want: "HTTP 404: object not found"},
-		{name: "bad query", code: 400, body: "bad query: not authorized\n", want: "HTTP 400: bad query: not authorized"},
+		{name: "unavailable", code: 503, body: "request canceled (log id ab)\n", want: "HTTP 503: request canceled", kind: errs.Canceled},
+		{name: "missing", code: 404, body: "object not found\n", want: "HTTP 404: object not found", kind: errs.NotFound},
+		{name: "bad query", code: 400, body: "bad query: not authorized\n", want: "HTTP 400: bad query: not authorized", kind: errs.Invalid},
 		{name: "bad json", code: 200, body: "not json", want: "invalid API JSON"},
-		{name: "network", want: "offline", transportErr: errors.New("offline")},
+		{name: "network", want: "cannot reach the server: ", transportErr: errors.New("offline")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -80,11 +84,17 @@ func TestCommandFailures(t *testing.T) {
 			cmd.SetOut(&out)
 			cmd.SetArgs([]string{"sql", "alpha", "SELECT 1"})
 			err := cmd.Execute()
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error: %v; want %q", err, tc.want)
+			if err == nil {
+				t.Fatal("expected an error")
 			}
 			if out.Len() != 0 {
 				t.Fatalf("unexpected stdout: %s", &out)
+			}
+			if got := userMessage(err); !strings.HasPrefix(got, tc.want) {
+				t.Fatalf("userMessage: %q; want prefix %q", got, tc.want)
+			}
+			if errs.KindOf(err) != tc.kind {
+				t.Fatalf("kind: %v; want %v", errs.KindOf(err), tc.kind)
 			}
 		})
 	}

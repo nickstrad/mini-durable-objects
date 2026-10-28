@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/rand/v2"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/nickstrad/mini-durable-objects/internal/errs"
 )
 
 func TestRegistryReusesWarmObject(t *testing.T) {
@@ -449,4 +452,24 @@ func TestRegistryReturnsOpenError(t *testing.T) {
 	if _, ok := r.objects["a"]; ok {
 		t.Fatal("failed activation left an object registered")
 	}
+}
+
+func TestRegistryRecoversPanic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newFakeRegistry(t, time.Hour)
+
+		err := r.do(context.Background(), "a", "a", func(*fakeRes) error { panic("boom") })
+		e := wrapped(t, err)
+		if e.Kind != errs.Internal {
+			t.Fatalf("got %v, want Internal", err)
+		}
+		if !bytes.Contains(e.Stack, []byte("panic")) {
+			t.Fatalf("stack does not show the panic:\n%s", e.Stack)
+		}
+		// The object still serves requests.
+		ran := false
+		if err := r.do(context.Background(), "a", "a", func(*fakeRes) error { ran = true; return nil }); err != nil || !ran {
+			t.Fatalf("after panic: ran %v, err %v", ran, err)
+		}
+	})
 }

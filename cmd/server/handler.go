@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/nickstrad/mini-durable-objects/internal/errs"
 	"github.com/nickstrad/mini-durable-objects/internal/store"
 )
 
@@ -30,18 +33,29 @@ func writeJSON(w http.ResponseWriter, value any) {
 	json.NewEncoder(w).Encode(value)
 }
 
-// writeError maps store errors to HTTP status codes.
+// writeError is the top of the server. It logs the error once with a log ID and
+// shows the client only the Message and that ID.
 func writeError(w http.ResponseWriter, err error) {
-	code, msg := http.StatusInternalServerError, err.Error()
-	switch {
-	case errors.Is(err, store.ErrBadQuery), errors.Is(err, store.ErrInvalidID):
-		code = http.StatusBadRequest
-	case errors.Is(err, store.ErrNotFound):
-		code = http.StatusNotFound
-	default:
-		msg = "storage error" // Don't leak internal error details.
+	id := rand.Text()
+
+	e, ok := errors.AsType[*errs.Error](err)
+	if !ok {
+		log.Printf("[%s] BUG: unwrapped error reached the top: %v", id, err)
+		http.Error(w, "internal error (log id "+id+")", http.StatusInternalServerError)
+		return
 	}
-	http.Error(w, msg, code)
+	// Only Internal errors carry a stack (see errs.Wrap).
+	log.Printf("[%s] %v: %v %v\n%s", id, e.Kind, e, e.Misc, e.Stack)
+	code := http.StatusInternalServerError
+	switch e.Kind {
+	case errs.Invalid, errs.BadQuery:
+		code = http.StatusBadRequest
+	case errs.NotFound:
+		code = http.StatusNotFound
+	case errs.Canceled:
+		code = http.StatusServiceUnavailable
+	}
+	http.Error(w, e.Message+" (log id "+id+")", code)
 }
 
 func (h handler) create(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +68,7 @@ func (h handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) sql(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
 	var body struct {
 		SQL    string `json:"sql"`
 		Params []any  `json:"params"`
@@ -61,20 +76,20 @@ func (h handler) sql(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	dec.UseNumber() // Keep integers exact instead of turning them into float64.
 	if err := dec.Decode(&body); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, errs.Wrap(err, errs.Invalid, "server.sql", "invalid JSON").With("object", id))
 		return
 	}
 	for i, p := range body.Params {
 		if n, ok := p.(json.Number); ok {
 			v, err := n.Int64()
 			if err != nil {
-				http.Error(w, "numeric parameters must be signed 64-bit integers", http.StatusBadRequest)
+				writeError(w, errs.Wrap(err, errs.Invalid, "server.sql", "numeric parameters must be signed 64-bit integers").With("object", id))
 				return
 			}
 			body.Params[i] = v
 		}
 	}
-	result, err := h.store.Query(r.Context(), chi.URLParam(r, "id"), body.SQL, body.Params)
+	result, err := h.store.Query(r.Context(), id, body.SQL, body.Params)
 	if err != nil {
 		writeError(w, err)
 		return

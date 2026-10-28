@@ -34,8 +34,8 @@ func FuzzObjectPath(f *testing.F) {
 	f.Fuzz(func(t *testing.T, id string) {
 		got, err := s.path(id)
 		if err != nil {
-			if !errors.Is(err, ErrInvalidID) {
-				t.Fatalf("path(%q) error = %v, want ErrInvalidID", id, err)
+			if !errors.Is(err, errInvalidID) {
+				t.Fatalf("path(%q) error = %v, want errInvalidID", id, err)
 			}
 			return
 		}

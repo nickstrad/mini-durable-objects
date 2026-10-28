@@ -66,7 +66,7 @@ var mutants = []mutant{
 	{"M12 do has no ctx.Done case", "registry.go", [][2]string{{"case <-ctx.Done():", "case <-make(chan struct{}):"}}},
 	{"M13 canceled do returns nil", "registry.go", [][2]string{{"\t\treturn ctx.Err()\n", "\t\treturn nil\n"}}},
 	{"M14 do returns before result", "registry.go", [][2]string{{"\treturn <-result\n", "\treturn nil\n"}}},
-	{"M15 do drops fn's error", "registry.go", [][2]string{{"func(res R) { result <- fn(res) }", "func(res R) { fn(res); result <- nil }"}}},
+	{"M15 do drops fn's error", "registry.go", [][2]string{{"func(res R) { result <- call(fn, res) }", "func(res R) { call(fn, res); result <- nil }"}}},
 	{"M16 release before fn finishes", "registry.go", [][2]string{{"\tdefer r.release(obj)\n", "\tr.release(obj)\n"}}},
 	// acquire
 	{"M17 acquire never stores object (no warm reuse)", "registry.go", [][2]string{{"\t\tr.objects[id] = obj\n", "\n"}}},
@@ -75,8 +75,8 @@ var mutants = []mutant{
 		"\tobj, ok := r.objects[id]\n\tif !ok {\n\t\tfor _, o := range r.objects {\n\t\t\tobj, ok = o, true\n\t\t}\n\t}\n"}}},
 	{"M19 active++ after the send", "registry.go", [][2]string{
 		{"\tobj.active++\n", "\n"},
-		{"\tcase obj.inbox <- func(res R) { result <- fn(res) }:\n",
-			"\tcase obj.inbox <- func(res R) { result <- fn(res) }:\n\t\tr.mu.Lock()\n\t\tobj.active++\n\t\tr.mu.Unlock()\n"}}},
+		{"\tcase obj.inbox <- func(res R) { result <- call(fn, res) }:\n",
+			"\tcase obj.inbox <- func(res R) { result <- call(fn, res) }:\n\t\tr.mu.Lock()\n\t\tobj.active++\n\t\tr.mu.Unlock()\n"}}},
 	// Returns before the inbox select, which becomes unreachable.
 	{"M20 each request opens its own resource on its own goroutine", "registry.go", [][2]string{{"\tresult := make(chan error, 1)\n",
 		"\tresult := make(chan error, 1)\n\tgo func() {\n\t\tres, err := r.open(path)\n\t\tif err != nil {\n\t\t\tresult <- err\n\t\t\treturn\n\t\t}\n\t\tdefer res.Close()\n\t\tresult <- fn(res)\n\t}()\n\treturn <-result\n"}}},
@@ -105,8 +105,18 @@ var mutants = []mutant{
 	{"P09 path joins id twice", "sqlite.go", [][2]string{{`filepath.Join(s.dir, id, "state.sqlite")`, `filepath.Join(s.dir, id, id, "state.sqlite")`}}},
 	{"P10 path uses wrong filename", "sqlite.go", [][2]string{{`filepath.Join(s.dir, id, "state.sqlite")`, `filepath.Join(s.dir, id, "state.db")`}}},
 	{"P11 path has no per-object dir", "sqlite.go", [][2]string{{`filepath.Join(s.dir, id, "state.sqlite")`, `filepath.Join(s.dir, id+".sqlite")`}}},
-	{"P12 path returns a different error value", "sqlite.go", [][2]string{{"\t\treturn \"\", ErrInvalidID\n", "\t\treturn \"\", errors.New(\"invalid object ID\")\n"}}},
+	{"P12 path returns a different error value", "sqlite.go", [][2]string{{"\t\treturn \"\", errInvalidID\n", "\t\treturn \"\", errors.New(\"invalid object ID\")\n"}}},
 	{"P13 path skips validation", "sqlite.go", [][2]string{{"if !validID.MatchString(id) {", "if false && !validID.MatchString(id) {"}}},
+	// panic recovery and the error boundary
+	{"E01 call does not recover", "registry.go", [][2]string{{"\t\tif p := recover(); p != nil {", "\t\tif p := interface{}(nil); p != nil {"}}},
+	{"E02 call recovers but drops the error", "registry.go", [][2]string{{"\t\t\terr = errs.Wrap(fmt.Errorf(\"panic: %v\", p), errs.Internal, \"store.registry\", \"storage error\")\n", "\t\t\t_ = errs.Wrap(fmt.Errorf(\"panic: %v\", p), errs.Internal, \"store.registry\", \"storage error\")\n"}}},
+	{"E03 recovered panic has no stack", "registry.go", [][2]string{{"errs.Wrap(fmt.Errorf(\"panic: %v\", p), errs.Internal", "&errs.Error{Inner: fmt.Errorf(\"panic: %v\", p), Kind: errs.Internal"}, {"\"store.registry\", \"storage error\")", "Op: \"store.registry\"}"}}},
+	{"E04 wrapErr treats deadline as canceled", "store.go", [][2]string{{"errors.Is(err, context.DeadlineExceeded)", "false"}}},
+	{"E05 wrapErr drops the Canceled kind", "store.go", [][2]string{{"errs.Canceled, \"request canceled\"", "errs.Internal, \"request canceled\""}}},
+	{"E06 wrapErr calls bad query internal", "store.go", [][2]string{{"errs.BadQuery, err.Error()", "errs.Internal, err.Error()"}}},
+	{"E07 wrapErr drops not found", "store.go", [][2]string{{"errs.NotFound, errNotFound.Error()", "errs.Internal, errNotFound.Error()"}}},
+	{"E08 Create skips the boundary wrap", "sqlite.go", [][2]string{{"return wrapErr(\"store.Create\", id, s.create(ctx, id))", "return s.create(ctx, id)"}}},
+	{"E09 Query skips the boundary wrap", "query.go", [][2]string{{"return out, wrapErr(\"store.Query\", id, err)", "return out, err"}}},
 }
 
 func main() {
