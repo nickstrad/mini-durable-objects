@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,12 +149,15 @@ func (f *fakeRes) Close() error {
 	return nil
 }
 
+// discard drops all log records.
+var discard = slog.New(slog.DiscardHandler)
+
 // newFakeRegistry returns a registry of fakes that is stopped when the test
 // ends.
 func newFakeRegistry(t *testing.T, idleTimeout time.Duration) *registry[*fakeRes] {
 	r := newRegistry(idleTimeout, func(path string) (*fakeRes, error) {
 		return &fakeRes{path: path}, nil
-	})
+	}, discard)
 	t.Cleanup(func() { stopAll(r) })
 	return r
 }
@@ -312,7 +317,7 @@ func regRandomWorkload(t *testing.T, seed uint64) {
 		opened = append(opened, res)
 		openedMu.Unlock()
 		return res, nil
-	})
+	}, discard)
 
 	ids := []string{"a", "b", "c", "d"}[:2+rng.IntN(3)]
 	inFlight := make(map[string]*atomic.Int32)
@@ -440,7 +445,7 @@ func regRandomWorkload(t *testing.T, seed uint64) {
 
 func TestRegistryReturnsOpenError(t *testing.T) {
 	want := errors.New("open failed")
-	r := newRegistry(time.Hour, func(string) (*fakeRes, error) { return nil, want })
+	r := newRegistry(time.Hour, func(string) (*fakeRes, error) { return nil, want }, discard)
 
 	err := r.do(t.Context(), "a", "a", func(*fakeRes) error {
 		t.Error("fn ran without a resource")
@@ -472,4 +477,25 @@ func TestRegistryRecoversPanic(t *testing.T) {
 			t.Fatalf("after panic: ran %v, err %v", ran, err)
 		}
 	})
+}
+
+func TestRegistryLogsActivateAndEvict(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	r := newRegistry(0, func(path string) (*fakeRes, error) { return &fakeRes{path: path}, nil }, logger)
+	t.Cleanup(func() { stopAll(r) })
+
+	do := func(id string) {
+		if err := r.do(t.Context(), id, id, func(*fakeRes) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	do("a")
+	do("b") // The idle timeout is 0, so this evicts a.
+	out := buf.String()
+	for _, want := range []string{"msg=\"object activated\" object=a", "msg=\"object evicted\" object=a", "msg=\"object activated\" object=b"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q: %s", want, out)
+		}
+	}
 }

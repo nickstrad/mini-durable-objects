@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,8 +21,8 @@ var _ Store = SQLite{}
 
 // NewSQLite stores objects under dir. An object unused for idleTimeout has its
 // database closed; the next request reopens it.
-func NewSQLite(dir string, idleTimeout time.Duration) SQLite {
-	return SQLite{dir: dir, objects: newRegistry(idleTimeout, openDB)}
+func NewSQLite(dir string, idleTimeout time.Duration, logger *slog.Logger) SQLite {
+	return SQLite{dir: dir, objects: newRegistry(idleTimeout, openDB, logger)}
 }
 
 // path maps each object ID to its own directory.

@@ -14,7 +14,7 @@ import (
 
 func TestSQLiteStore(t *testing.T) {
 	ctx := context.Background()
-	var s Store = NewSQLite(t.TempDir(), time.Minute)
+	var s Store = NewSQLite(t.TempDir(), time.Minute, discard)
 
 	if err := s.Create(ctx, "BAD"); errs.KindOf(err) != errs.Invalid {
 		t.Fatalf("create invalid: %v", err)
@@ -67,7 +67,7 @@ func TestSQLiteForeignErrorIsWrapped(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSQLite(file, time.Minute) // A file cannot hold object directories.
+	s := NewSQLite(file, time.Minute, discard) // A file cannot hold object directories.
 
 	e := wrapped(t, s.Create(context.Background(), "alpha"))
 	if e.Kind != errs.Internal || e.Message != "storage error" || e.Op != "store.Create" {
@@ -79,7 +79,7 @@ func TestSQLiteForeignErrorIsWrapped(t *testing.T) {
 }
 
 func TestSQLiteCanceledRequest(t *testing.T) {
-	s := NewSQLite(t.TempDir(), time.Minute)
+	s := NewSQLite(t.TempDir(), time.Minute, discard)
 	if err := s.Create(context.Background(), "alpha"); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestSQLiteCanceledRequest(t *testing.T) {
 }
 
 func TestSQLiteBadQueryMessageIsSQLiteText(t *testing.T) {
-	s := NewSQLite(t.TempDir(), time.Minute)
+	s := NewSQLite(t.TempDir(), time.Minute, discard)
 	ctx := context.Background()
 	if err := s.Create(ctx, "alpha"); err != nil {
 		t.Fatal(err)

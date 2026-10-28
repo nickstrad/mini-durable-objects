@@ -7,11 +7,17 @@ A small Go learning project with one SQLite database per object.
 Start the server:
 
 ```sh
-make start   # or: go run ./cmd/server -addr 127.0.0.1:8787 -data data/objects -idle 1m
+make start   # or: go run ./cmd/server -addr 127.0.0.1:8787 -data data/objects -idle 1m -log-level info -log-format text
 ```
 
 An object's database stays open while it is in use and closes after `-idle`
 (default 1 minute) without requests; the next request reopens it.
+
+The server writes logs to stderr. Use `-log-level` to set the lowest level:
+`debug`, `info`, `warn`, or `error`. The default is `info`. Use `-log-format` to
+select `text` or `json`. The default is `text`. The `json` format writes one JSON
+object on each line. At the `debug` level, the server writes one record for each
+HTTP request. [CODING_STYLE.md](CODING_STYLE.md#logs) gives the levels and the keys.
 
 In another terminal, seed objects (alpha, beta, and fake-1..fake-N; N defaults
 to 5). Seeding builds `bin/mdo` and runs `mdo create` for each ID. A new object

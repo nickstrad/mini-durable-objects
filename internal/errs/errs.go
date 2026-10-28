@@ -23,9 +23,9 @@ func (k Kind) String() string {
 	case Invalid:
 		return "invalid"
 	case NotFound:
-		return "not found"
+		return "not_found"
 	case BadQuery:
-		return "bad query"
+		return "bad_query"
 	case Canceled:
 		return "canceled"
 	default:

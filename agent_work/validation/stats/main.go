@@ -21,8 +21,8 @@ import (
 
 var registryEdits = [][2]string{
 	{"import (\n\t\"context\"", "import (\n\t\"context\"\n\t\"sync/atomic\""},
-	{"\t\tlog.Printf(\"ACTIVATE %s\", id)\n", "\t\tlog.Printf(\"ACTIVATE %s\", id)\n\t\tstatActivate.Add(1)\n"},
-	{"\t\t\tlog.Printf(\"EVICT %s\", id)\n", "\t\t\tlog.Printf(\"EVICT %s\", id)\n\t\t\tstatEvict.Add(1)\n"},
+	{"\t\tr.logger.Info(\"object activated\", \"object\", id)\n", "\t\tr.logger.Info(\"object activated\", \"object\", id)\n\t\tstatActivate.Add(1)\n"},
+	{"\t\t\tr.logger.Info(\"object evicted\", \"object\", id)\n", "\t\t\tr.logger.Info(\"object evicted\", \"object\", id)\n\t\t\tstatEvict.Add(1)\n"},
 	{"func (r *registry[R]) evictIdle() {", "var statActivate, statEvict atomic.Int64\n\nfunc (r *registry[R]) evictIdle() {"},
 }
 

@@ -96,11 +96,12 @@ These rules come from the table:
 
 The HTTP top level is `writeError` in `cmd/server/handler.go`. It does these steps:
 
-1. It makes a log ID from 8 random bytes, in hex.
-2. If the error is not an `*errs.Error`, it writes `[id] BUG: unwrapped error reached
-   the top` and the full error to the log. It sends 500 `internal error (log id id)`.
-3. If the error is an `*errs.Error`, it writes `[id]`, the Kind, the error, and `Misc`
-   to the log. For `Internal`, the log line also has the stack.
+1. It makes a log ID with `rand.Text()` from `crypto/rand`.
+2. If the error is not an `*errs.Error`, it writes one log record at level Error, with
+   the message `unwrapped error reached the top`. It sends 500
+   `internal error (log id id)`.
+3. If the error is an `*errs.Error`, it writes one log record with the message
+   `request failed`. The level and the keys are in [Logs](#logs).
 4. It sends `Message (log id id)` with the status for the Kind.
 
 | Kind | HTTP status |
@@ -139,6 +140,9 @@ The CLI top level is `main` and `userMessage` in `cmd/mdo/main.go`:
 | Recover a panic in the object goroutine | `call` in `internal/store/registry.go`. It makes the panic into an `Internal` error that has the panic stack. The object goroutine continues to serve requests. |
 | Wrap the errors of the handler | `sql` in `cmd/server/handler.go`: bad JSON and bad numbers become `Invalid`. |
 | The top level | `writeError` in `cmd/server/handler.go`, and `userMessage` in `cmd/mdo/main.go`. |
+| The logger and its flags | `newLogger` in `cmd/server/main.go`. |
+| The `request failed` record and its level | `writeError` in `cmd/server/handler.go`. One switch on the Kind picks the HTTP status and the log level. |
+| The Debug `request` record | `logRequests` in `cmd/server/handler.go`. |
 
 The store gives each Kind this Message:
 
@@ -150,3 +154,76 @@ The store gives each Kind this Message:
 | The deadline passed | `Canceled` | `request timed out` |
 | The caller stopped the request | `Canceled` | `request canceled` |
 | All other causes | `Internal` | `storage error` |
+
+## Logs
+
+The server writes logs with `log/slog` from the standard library. This section tells
+you which level to use, which keys to use, and which data to keep out of the log.
+
+### The logger
+
+- `main` in `cmd/server` makes one `*slog.Logger`. It gives that logger to the
+  constructors `newRouter` and `store.NewSQLite`.
+- Each package keeps the logger that it gets. Do not call the package-level functions,
+  for example `slog.Info` or `log.Printf`. Then a test can give a logger that writes to
+  a buffer, or `slog.New(slog.DiscardHandler)`.
+- The CLI, `cmd/mdo`, does not write logs. It writes results to stdout and errors to
+  stderr.
+
+### Format and level
+
+Two server flags set the logger. The server writes the log to stderr.
+
+| Flag | Values | Default |
+|---|---|---|
+| `-log-format` | `text`: one `key=value` line for each record, for a person to read. `json`: one JSON object on each line (JSONL), for a tool to read. | `text` |
+| `-log-level` | `debug`, `info`, `warn`, `error`. The logger writes the records at this level and at the levels above it. | `info` |
+
+### Levels
+
+| Level | Use it for | Examples |
+|---|---|---|
+| Error | A failure that an operator must examine. | An `Internal` error at the top. An unwrapped error at the top. |
+| Warn | A problem that is not a bug. It can show that the server has too much work. | A `Canceled` error at the top: the request timed out, or the client stopped it. |
+| Info | Usual events that are important. | The server started. An object started or stopped. A client error at the top: `Invalid`, `NotFound`, or `BadQuery`. |
+| Debug | Detail about one request. Turn it on only to find a problem. | One record for each HTTP request. |
+
+### Messages and keys
+
+- The message is a short fixed phrase in lower case, for example `object activated`. Do
+  not put data in the message. Put data in attributes.
+- Use these keys. Use the same key for the same data each time.
+
+| Key | Value |
+|---|---|
+| `log_id` | The log ID that the client sees. |
+| `kind` | The error Kind: `internal`, `invalid`, `not_found`, `bad_query`, or `canceled`. |
+| `op` | The operation. |
+| `object` | The object ID. |
+| `err` | The error text, from `Error()`. |
+| Each key in `Misc` | The value from `Misc`. Each entry of `Misc` is a separate key, for example `object`. |
+| `stack` | The stack. Only `Internal` errors have one. |
+| `method`, `path`, `status`, `duration` | The HTTP request, in the Debug record. |
+| `addr`, `data`, `idle` | The server settings, in the start record. |
+
+In the `json` format, a duration (`duration`, `idle`) is a number of nanoseconds. In
+the `text` format, it is a text such as `1m0s`.
+
+These are the log records in this repo:
+
+| Message | Level | Keys |
+|---|---|---|
+| `server started` | Info | `addr`, `data`, `idle` |
+| `server stopped` | Error | `err` |
+| `object activated` | Info | `object` |
+| `object evicted` | Info | `object` |
+| `request failed` | From the Kind | `log_id`, `kind`, `op`, `err`, the keys in `Misc`, `stack` |
+| `unwrapped error reached the top` | Error | `log_id`, `err` |
+| `request` | Debug | `method`, `path`, `status`, `duration` |
+
+### Data to keep out of the log
+
+- Do not write SQL text, SQL parameters, or request bodies to the log. They can
+  contain user data.
+- An error text can contain a part of the SQL, because SQLite puts it in the error. This
+  is permitted.

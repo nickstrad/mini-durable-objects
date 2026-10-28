@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -25,6 +25,7 @@ import (
 type registry[R io.Closer] struct {
 	idleTimeout time.Duration
 	open        func(path string) (R, error)
+	logger      *slog.Logger
 
 	mu      sync.Mutex
 	objects map[string]*object[R]
@@ -38,8 +39,8 @@ type object[R io.Closer] struct {
 }
 
 // newRegistry makes a registry that activates objects with open.
-func newRegistry[R io.Closer](idleTimeout time.Duration, open func(path string) (R, error)) *registry[R] {
-	return &registry[R]{idleTimeout: idleTimeout, open: open, objects: make(map[string]*object[R])}
+func newRegistry[R io.Closer](idleTimeout time.Duration, open func(path string) (R, error), logger *slog.Logger) *registry[R] {
+	return &registry[R]{idleTimeout: idleTimeout, open: open, logger: logger, objects: make(map[string]*object[R])}
 }
 
 // do runs fn with id's resource on the object's goroutine, opening path if the
@@ -103,7 +104,7 @@ func (r *registry[R]) acquire(id, path string) (*object[R], error) {
 		go run(done, inbox, res)
 		obj = &object[R]{inbox: inbox, done: done}
 		r.objects[id] = obj
-		log.Printf("ACTIVATE %s", id)
+		r.logger.Info("object activated", "object", id)
 	}
 	// Count the request before it waits in the inbox, so the object is not
 	// evicted while the request is in line.
@@ -143,7 +144,7 @@ func (r *registry[R]) evictIdle() {
 		if obj.active == 0 && now.Sub(obj.lastUsed) >= r.idleTimeout {
 			close(obj.done)
 			delete(r.objects, id)
-			log.Printf("EVICT %s", id)
+			r.logger.Info("object evicted", "object", id)
 		}
 	}
 }

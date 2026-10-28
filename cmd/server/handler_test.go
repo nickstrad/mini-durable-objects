@@ -2,11 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,11 +15,14 @@ import (
 	"github.com/nickstrad/mini-durable-objects/internal/store"
 )
 
+// discard drops all log records.
+var discard = slog.New(slog.DiscardHandler)
+
 // testObject returns a router whose store holds one object, "alpha", with a
 // notes table.
 func testObject(t *testing.T) http.Handler {
 	t.Helper()
-	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute))
+	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, discard), discard)
 	if w := request(h, "POST", "/objects/alpha", ""); w.Code != 200 {
 		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
 	}
@@ -125,67 +128,97 @@ func TestSQLRoute(t *testing.T) {
 	}
 }
 
-// captureLog sends the log to a buffer until the test ends.
-func captureLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
+// captureLog returns a logger that writes JSON records to a buffer.
+func captureLog(level slog.Level) (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	return &buf
+	return slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: level})), &buf
+}
+
+// records decodes the JSON log lines in buf.
+func records(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("bad log line %q: %v", line, err)
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 func TestWriteErrorKinds(t *testing.T) {
-	captureLog(t)
 	for _, tc := range []struct {
-		kind errs.Kind
-		code int
+		kind  errs.Kind
+		code  int
+		level string
 	}{
-		{errs.Invalid, 400},
-		{errs.BadQuery, 400},
-		{errs.NotFound, 404},
-		{errs.Canceled, 503},
-		{errs.Internal, 500},
+		{errs.Invalid, 400, "INFO"},
+		{errs.BadQuery, 400, "INFO"},
+		{errs.NotFound, 404, "INFO"},
+		{errs.Canceled, 503, "WARN"},
+		{errs.Internal, 500, "ERROR"},
 	} {
+		logger, buf := captureLog(slog.LevelDebug)
 		w := httptest.NewRecorder()
-		writeError(w, errs.Wrap(errors.New("cause"), tc.kind, "store.Query", "shown message"))
+		err := errs.Wrap(errors.New("cause"), tc.kind, "store.Query", "shown message").With("object", "alpha")
+		handler{logger: logger}.writeError(w, err)
 		if w.Code != tc.code {
 			t.Errorf("%v: got %d; want %d", tc.kind, w.Code, tc.code)
 		}
-		if body := w.Body.String(); !strings.HasPrefix(body, "shown message (log id ") || strings.Contains(body, "cause") {
+		body := w.Body.String()
+		if !strings.HasPrefix(body, "shown message (log id ") || strings.Contains(body, "cause") {
 			t.Errorf("%v: body %q", tc.kind, body)
+		}
+		recs := records(t, buf)
+		if len(recs) != 1 {
+			t.Fatalf("%v: got %d records; want 1", tc.kind, len(recs))
+		}
+		rec := recs[0]
+		if rec["level"] != tc.level || rec["msg"] != "request failed" || rec["kind"] != tc.kind.String() ||
+			rec["op"] != "store.Query" || rec["object"] != "alpha" {
+			t.Errorf("%v: record %v", tc.kind, rec)
+		}
+		_, hasStack := rec["stack"]
+		if hasStack != (tc.kind == errs.Internal) {
+			t.Errorf("%v: stack present = %v", tc.kind, hasStack)
 		}
 	}
 }
 
 func TestWriteErrorDoesNotLeak(t *testing.T) {
-	logs := captureLog(t)
 	for _, tc := range []struct {
-		err       error
-		wantStack bool
+		err   error
+		msg   string
+		level string
 	}{
-		{errors.New("secret path /x"), false}, // not an *errs.Error: a bug
-		{errs.Wrap(errors.New("secret path /x"), errs.Internal, "store.Query", "storage error"), true},
+		{errors.New("secret path /x"), "unwrapped error reached the top", "ERROR"},
+		{errs.Wrap(errors.New("secret path /x"), errs.Internal, "store.Query", "storage error"), "request failed", "ERROR"},
 	} {
-		logs.Reset()
+		logger, buf := captureLog(slog.LevelInfo)
 		w := httptest.NewRecorder()
-		writeError(w, tc.err)
+		handler{logger: logger}.writeError(w, tc.err)
 		body := w.Body.String()
 		_, id, found := strings.Cut(body, "log id ")
 		id = strings.TrimSuffix(strings.TrimSpace(id), ")")
 		if w.Code != 500 || strings.Contains(body, "secret") || !found {
 			t.Errorf("got %d %q", w.Code, body)
 		}
-		if !strings.Contains(logs.String(), "secret path /x") || !strings.Contains(logs.String(), "["+id+"]") {
-			t.Errorf("log missing cause or id %q: %s", id, logs)
+		rec := records(t, buf)[0]
+		if rec["log_id"] != id || rec["msg"] != tc.msg || rec["level"] != tc.level {
+			t.Errorf("record %v; want log_id %q", rec, id)
 		}
-		if tc.wantStack && !strings.Contains(logs.String(), "goroutine ") {
-			t.Errorf("internal error log has no stack: %s", logs)
+		if !strings.Contains(rec["err"].(string), "secret path /x") {
+			t.Errorf("log missing cause: %v", rec)
 		}
 	}
 }
 
 func TestHandlerErrorsHaveLogID(t *testing.T) {
-	captureLog(t)
 	h := testObject(t)
 	for body, want := range map[string]string{
 		`not json`:                          "invalid JSON (log id ",
@@ -194,6 +227,69 @@ func TestHandlerErrorsHaveLogID(t *testing.T) {
 		w := request(h, "POST", "/objects/alpha/sql", body)
 		if w.Code != 400 || !strings.HasPrefix(w.Body.String(), want) {
 			t.Errorf("%s: got %d %q", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestRequestRecord(t *testing.T) {
+	logger, buf := captureLog(slog.LevelDebug)
+	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, logger), logger)
+	request(h, "POST", "/objects/alpha", "")
+	buf.Reset()
+	request(h, "POST", "/objects/alpha/sql", `{"sql":"SELECT 'topsecret-sql'","params":["topsecret-param"]}`)
+	request(h, "POST", "/objects/missing/sql", `{"sql":"SELECT 1"}`)
+
+	var reqs []map[string]any
+	for _, rec := range records(t, buf) {
+		if rec["msg"] == "request" {
+			reqs = append(reqs, rec)
+		}
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("got %d request records; want 2: %s", len(reqs), buf)
+	}
+	for i, want := range []struct {
+		path   string
+		status float64
+	}{{"/objects/alpha/sql", 200}, {"/objects/missing/sql", 404}} {
+		rec := reqs[i]
+		if rec["level"] != "DEBUG" || rec["method"] != "POST" || rec["path"] != want.path || rec["status"] != want.status {
+			t.Errorf("record %d: %v", i, rec)
+		}
+		if _, ok := rec["duration"]; !ok {
+			t.Errorf("record %d has no duration", i)
+		}
+	}
+	if strings.Contains(buf.String(), "topsecret") {
+		t.Errorf("log has request data: %s", buf)
+	}
+}
+
+func TestNewLogger(t *testing.T) {
+	var buf bytes.Buffer
+	logger, err := newLogger("text", "info", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Debug("hidden")
+	logger.Info("shown", "object", "alpha")
+	if out := buf.String(); strings.Contains(out, "hidden") || !strings.Contains(out, "level=INFO msg=shown object=alpha") {
+		t.Errorf("text output: %q", out)
+	}
+
+	buf.Reset()
+	logger, err = newLogger("json", "debug", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Debug("shown", "object", "alpha")
+	if rec := records(t, &buf)[0]; rec["level"] != "DEBUG" || rec["msg"] != "shown" || rec["object"] != "alpha" {
+		t.Errorf("json record: %v", rec)
+	}
+
+	for _, tc := range [][2]string{{"xml", "info"}, {"text", "loud"}, {"text", ""}} {
+		if _, err := newLogger(tc[0], tc[1], &buf); err == nil {
+			t.Errorf("newLogger(%q, %q): want error", tc[0], tc[1])
 		}
 	}
 }
