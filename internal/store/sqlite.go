@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/nickstrad/mini-durable-objects/internal/errs"
+	"github.com/nickstrad/mini-durable-objects/internal/events"
 )
 
 // SQLite stores each object in its own database at <dir>/<id>/state.sqlite.
@@ -20,9 +23,9 @@ type SQLite struct {
 var _ Store = SQLite{}
 
 // NewSQLite stores objects under dir. An object unused for idleTimeout has its
-// database closed; the next request reopens it.
-func NewSQLite(dir string, idleTimeout time.Duration, logger *slog.Logger) SQLite {
-	return SQLite{dir: dir, objects: newRegistry(idleTimeout, openDB, logger)}
+// database closed; the next request reopens it. rec may be nil.
+func NewSQLite(dir string, idleTimeout time.Duration, logger *slog.Logger, rec *events.Recorder) SQLite {
+	return SQLite{dir: dir, objects: newRegistry(idleTimeout, openDB, logger, rec)}
 }
 
 // path maps each object ID to its own directory.
@@ -34,7 +37,7 @@ func (s SQLite) path(id string) (string, error) {
 }
 
 // do runs fn with an existing object's database on the object's goroutine.
-func (s SQLite) do(ctx context.Context, id string, fn func(*objectDB) error) error {
+func (s SQLite) do(ctx context.Context, id string, fn func(*objectDB) error, tm *timing) error {
 	path, err := s.path(id)
 	if err != nil {
 		return err
@@ -44,14 +47,29 @@ func (s SQLite) do(ctx context.Context, id string, fn func(*objectDB) error) err
 	} else if err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
-	return s.objects.do(ctx, id, path, fn)
+	return s.objects.doTimed(ctx, id, path, fn, tm)
 }
 
 func (s SQLite) Create(ctx context.Context, id string) error {
-	return wrapErr("store.Create", id, s.create(ctx, id))
+	start := time.Now()
+	var tm timing
+	err := wrapErr("store.Create", id, s.create(ctx, id, &tm))
+	s.emit(start, id, "create", err, tm, 0)
+	return err
 }
 
-func (s SQLite) create(ctx context.Context, id string) error {
+// emit records one request event. It runs after wrapErr, so kind is the
+// Kind the client sees.
+func (s SQLite) emit(start time.Time, id, op string, err error, tm timing, rows int) {
+	kind := "ok"
+	if err != nil {
+		kind, rows = errs.KindOf(err).String(), 0
+	}
+	s.objects.rec.Request(events.Request{Start: start, Object: id, Op: op, Kind: kind, Ran: tm.Ran, Depth: tm.Depth,
+		Lock: tm.Lock, Open: tm.Open, Queue: tm.Queue, ExecAt: tm.ExecAt, Exec: tm.Exec, Total: time.Since(start), Rows: rows})
+}
+
+func (s SQLite) create(ctx context.Context, id string, tm *timing) error {
 	path, err := s.path(id)
 	if err != nil {
 		return err
@@ -60,7 +78,7 @@ func (s SQLite) create(ctx context.Context, id string) error {
 		return fmt.Errorf("create dir: %w", err)
 	}
 	// Connecting creates the database file if it does not exist yet.
-	return s.objects.do(ctx, id, path, func(db *objectDB) error {
+	return s.objects.doTimed(ctx, id, path, func(db *objectDB) error {
 		return db.PingContext(ctx)
-	})
+	}, tm)
 }

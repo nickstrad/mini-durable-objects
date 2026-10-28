@@ -22,7 +22,7 @@ var discard = slog.New(slog.DiscardHandler)
 // notes table.
 func testObject(t *testing.T) http.Handler {
 	t.Helper()
-	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, discard), discard)
+	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, discard, nil), discard)
 	if w := request(h, "POST", "/objects/alpha", ""); w.Code != 200 {
 		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
 	}
@@ -233,7 +233,7 @@ func TestHandlerErrorsHaveLogID(t *testing.T) {
 
 func TestRequestRecord(t *testing.T) {
 	logger, buf := captureLog(slog.LevelDebug)
-	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, logger), logger)
+	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute, logger, nil), logger)
 	request(h, "POST", "/objects/alpha", "")
 	buf.Reset()
 	request(h, "POST", "/objects/alpha/sql", `{"sql":"SELECT 'topsecret-sql'","params":["topsecret-param"]}`)

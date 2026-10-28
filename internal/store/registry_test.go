@@ -36,26 +36,26 @@ func TestRegistryReusesWarmObject(t *testing.T) {
 func TestRegistryEvictsOnlyIdleObjects(t *testing.T) {
 	r := newFakeRegistry(t, 0) // Every released object is immediately idle.
 
-	a, err := r.acquire("a", "a")
+	a, err := r.acquire("a", "a", &timing{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.acquire("b", "b")
+	b, err := r.acquire("b", "b", &timing{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.release(b)
+	r.release(b, new(timing))
 	if _, ok := r.objects["a"]; !ok {
 		t.Fatal("object in use was evicted")
 	}
 
-	r.release(a)
-	b, err = r.acquire("b", "b")
+	r.release(a, new(timing))
+	b, err = r.acquire("b", "b", &timing{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	r.release(b)
+	r.release(b, new(timing))
 	if _, ok := r.objects["a"]; ok {
 		t.Fatal("idle object was not evicted")
 	}
@@ -157,7 +157,7 @@ var discard = slog.New(slog.DiscardHandler)
 func newFakeRegistry(t *testing.T, idleTimeout time.Duration) *registry[*fakeRes] {
 	r := newRegistry(idleTimeout, func(path string) (*fakeRes, error) {
 		return &fakeRes{path: path}, nil
-	}, discard)
+	}, discard, nil)
 	t.Cleanup(func() { stopAll(r) })
 	return r
 }
@@ -317,7 +317,7 @@ func regRandomWorkload(t *testing.T, seed uint64) {
 		opened = append(opened, res)
 		openedMu.Unlock()
 		return res, nil
-	}, discard)
+	}, discard, nil)
 
 	ids := []string{"a", "b", "c", "d"}[:2+rng.IntN(3)]
 	inFlight := make(map[string]*atomic.Int32)
@@ -445,7 +445,7 @@ func regRandomWorkload(t *testing.T, seed uint64) {
 
 func TestRegistryReturnsOpenError(t *testing.T) {
 	want := errors.New("open failed")
-	r := newRegistry(time.Hour, func(string) (*fakeRes, error) { return nil, want }, discard)
+	r := newRegistry(time.Hour, func(string) (*fakeRes, error) { return nil, want }, discard, nil)
 
 	err := r.do(t.Context(), "a", "a", func(*fakeRes) error {
 		t.Error("fn ran without a resource")
@@ -482,7 +482,7 @@ func TestRegistryRecoversPanic(t *testing.T) {
 func TestRegistryLogsActivateAndEvict(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	r := newRegistry(0, func(path string) (*fakeRes, error) { return &fakeRes{path: path}, nil }, logger)
+	r := newRegistry(0, func(path string) (*fakeRes, error) { return &fakeRes{path: path}, nil }, logger, nil)
 	t.Cleanup(func() { stopAll(r) })
 
 	do := func(id string) {

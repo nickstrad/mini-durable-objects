@@ -214,12 +214,15 @@ These are the log records in this repo:
 | Message | Level | Keys |
 |---|---|---|
 | `server started` | Info | `addr`, `data`, `idle` |
-| `server stopped` | Error | `err` |
+| `server stopped` | Info after SIGINT or SIGTERM. Error if the HTTP server failed. | `err`, if there is an error |
 | `object activated` | Info | `object` |
 | `object evicted` | Info | `object` |
 | `request failed` | From the Kind | `log_id`, `kind`, `op`, `err`, the keys in `Misc`, `stack` |
 | `unwrapped error reached the top` | Error | `log_id`, `err` |
 | `request` | Debug | `method`, `path`, `status`, `duration` |
+| `server shutdown incomplete` | Warn | `err`. The open requests did not end in 5 seconds after the signal. |
+| `events write failed` | Error | `err` |
+| `events close failed` | Error | `err` |
 
 ### Data to keep out of the log
 
@@ -227,3 +230,137 @@ These are the log records in this repo:
   contain user data.
 - An error text can contain a part of the SQL, because SQLite puts it in the error. This
   is permitted.
+
+## Events
+
+Events are data for analysis. Logs are for an operator. The server writes a log record
+only for important or failed events. When events are on, the server writes an event
+for each request and for each change to an object. A tool, for example DuckDB, reads
+the events later.
+
+Events are off by default. To turn them on, start the server with `-events <dir>`.
+
+### What the events record
+
+The events show three things:
+
+- **Integration points.** A request goes across these boundaries in sequence: the store
+  method, the registry lock, the open of the database, the object inbox, and SQLite. The
+  request event records the time at each boundary.
+- **Contention for resources.** All objects share the registry lock. The requests for one
+  object share its goroutine. The event records the time that a request waits for each
+  of these resources, and the number of requests in front of it.
+- **Time.** The event records the time for each step and the total time. The steps
+  must not be more than the total.
+
+### Files
+
+The server writes CSV files with a header line into the events directory. Each run of
+the server has a run ID, and each file name contains it:
+
+| File | One row for each |
+|---|---|
+| `requests-<run>.csv` | Call to `Store.Create` or `Store.Query`. |
+| `objects-<run>.csv` | Activation or eviction of an object. |
+| `runs-<run>.csv` | Run. The server writes this row when it stops correctly. If the row is not there, the server did not stop correctly. |
+
+All times are integers in nanoseconds. A duration ends in `_ns`. A time point ends in
+`_at`:
+
+- In the requests and objects files, a time point is the time since the recorder
+  started. The recorder uses the monotonic clock for all time points and durations.
+  Thus, you can add a time point and a duration, and a change to the system clock has
+  no effect.
+- In the runs file, `started_at` and `stopped_at` are Unix time. Use `started_at` to
+  change an offset into a clock time. The run ID also contains the start time, to the
+  second.
+
+`requests-<run>.csv`:
+
+| Column | Value |
+|---|---|
+| `run_id` | The run ID. |
+| `seq` | A number that increases by 1 for each event in the run. The objects file uses the same sequence. A gap shows a dropped event. |
+| `start_at` | The time when the store method started. |
+| `object` | The object ID. |
+| `op` | `create` or `query`. |
+| `kind` | `ok`, or the error Kind: `invalid`, `not_found`, `bad_query`, `canceled`, `internal`. |
+| `ran` | `true` if the object goroutine ran the request. `false` if the request stopped before that, for example because of a bad ID or a canceled context. |
+| `depth` | The number of requests for this object that were active or in the inbox when this request arrived. 0 means that the object was free. |
+| `lock_ns` | The time to get the registry lock. |
+| `open_ns` | The time to open the database. It is 0 if the object was already active. |
+| `queue_ns` | The time in the object inbox before the goroutine started the request. |
+| `exec_at` | The time when the object goroutine started the request. It is empty (NULL in DuckDB) if `ran` is `false`. |
+| `exec_ns` | The time that the goroutine used to run the request: the transaction, the SQL, and the commit. |
+| `total_ns` | The time from the start to the end of the store method. |
+| `rows` | The number of rows that the query returned. It is 0 for `create`. |
+
+`objects-<run>.csv`:
+
+| Column | Value |
+|---|---|
+| `run_id`, `seq`, `object` | As in the requests file. |
+| `at` | The time of the event. |
+| `event` | `activated` or `evicted`. |
+| `open_ns` | `activated`: the time to open the database. `evicted`: 0. |
+| `idle_ns` | `evicted`: the time from the last request to the eviction. `activated`: 0. |
+| `lifetime_ns` | `evicted`: the time from the activation to the eviction. `activated`: 0. |
+| `requests` | `evicted`: the number of requests that the object ran in this activation. `activated`: 0. |
+
+`runs-<run>.csv`:
+
+| Column | Value |
+|---|---|
+| `run_id` | The run ID. |
+| `started_at`, `stopped_at` | The start and the stop of the recorder, in Unix time. |
+| `written` | The number of events in the files. |
+| `dropped` | The number of events that the recorder did not keep. The buffer was full, or the event came after the recorder stopped. |
+| `max_buffered` | The largest number of events in the buffer at one time. |
+
+### How to record an event
+
+Recording must not slow down a request:
+
+- A request does not write to a file. It sends a small struct to a buffered channel.
+- The send does not wait. If the channel is full, the recorder drops the event and adds
+  1 to `dropped`.
+- One recorder goroutine reads the channel. It changes each event into a CSV row and
+  writes the row to a file buffer. It flushes the buffers to the files at the
+  `-events-flush` interval.
+- When the server gets SIGINT or SIGTERM, it stops the HTTP server, writes the events
+  that are in the buffer, and writes the `runs` row. If the process stops without a
+  signal, the events of the last flush interval are lost.
+- A nil recorder does nothing. Tests that do not need events give nil.
+
+### Flags
+
+| Flag | Values | Default |
+|---|---|---|
+| `-events` | A directory for the CSV files. An empty value turns events off. | Empty: off |
+| `-events-flush` | The time between two flushes, for example `1s`. | `1s` |
+
+### Data to keep out of the events
+
+The rules for logs also apply to events. Do not write SQL text, SQL parameters, or
+request bodies.
+
+### Rules that the events must obey
+
+After a workload, run `scripts/events.sh invariants`. It counts the violations of rules
+1, 2, 4, and 5. It does not know the `-idle` value, so it does not examine the idle time
+in rule 4. To examine it, compare `min_idle_s` in `scripts/events.sh lifecycle` with
+`-idle`. Rule 3 needs the value in the database, so examine it by hand: compare the
+`ok` increment events with the last value of the counter.
+
+1. **One request at a time for each object.** For one object, the `exec` intervals of two
+   requests do not overlap. The interval starts at `exec_at`, and its length is
+   `exec_ns`.
+2. **The steps fit in the total.** `lock_ns + open_ns + queue_ns + exec_ns <= total_ns`.
+3. **Each committed change has an event.** For a counter that requests increase by 1,
+   the number of `ok` increment events is equal to the last value of the counter.
+4. **The life of an object is in sequence.** For one object, the events are `activated`,
+   `evicted`, `activated`, and so on. An eviction comes only after the idle time.
+   `requests` in the `evicted` row is equal to the number of request events with
+   `ran = true` in that activation.
+5. **No event is lost.** After a correct stop, `dropped` is 0, `seq` has no gaps, and
+   `written` is equal to the number of rows.

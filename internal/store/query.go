@@ -92,11 +92,15 @@ func (c connector) Connect(context.Context) (driver.Conn, error) { return c.driv
 func (c connector) Driver() driver.Driver                        { return c.driver }
 
 func (s SQLite) Query(ctx context.Context, id, query string, params []any) (QueryResult, error) {
-	out, err := s.query(ctx, id, query, params)
-	return out, wrapErr("store.Query", id, err)
+	start := time.Now()
+	var tm timing
+	out, err := s.query(ctx, id, query, params, &tm)
+	err = wrapErr("store.Query", id, err)
+	s.emit(start, id, "query", err, tm, len(out.Rows))
+	return out, err
 }
 
-func (s SQLite) query(ctx context.Context, id, query string, params []any) (QueryResult, error) {
+func (s SQLite) query(ctx context.Context, id, query string, params []any, tm *timing) (QueryResult, error) {
 	var out QueryResult
 	err := s.do(ctx, id, func(db *objectDB) error {
 		// The budget starts once the object runs the query, not while it waits in line.
@@ -105,7 +109,7 @@ func (s SQLite) query(ctx context.Context, id, query string, params []any) (Quer
 		var err error
 		out, err = runQuery(ctx, db, query, params)
 		return err
-	})
+	}, tm)
 	return out, err
 }
 

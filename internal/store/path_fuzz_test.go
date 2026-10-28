@@ -29,7 +29,7 @@ func FuzzObjectPath(f *testing.F) {
 	}
 
 	dir := filepath.Join(f.TempDir(), "objects")
-	s := NewSQLite(dir, time.Minute, discard)
+	s := NewSQLite(dir, time.Minute, discard, nil)
 
 	f.Fuzz(func(t *testing.T, id string) {
 		got, err := s.path(id)
