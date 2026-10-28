@@ -7,42 +7,52 @@ A small Go learning project with one SQLite database per object.
 Start the server:
 
 ```sh
-make start
+make start   # or: go run ./cmd/server -addr 127.0.0.1:8787 -data data/objects -idle 1m
 ```
 
-In another terminal, seed objects (task-alpha, task-beta, and fake-1..fake-N;
-N defaults to 5). Seeding builds `bin/mdo` and runs `mdo create` for each ID.
-It also adds the events table to existing databases:
+An object's database stays open while it is in use and closes after `-idle`
+(default 1 minute) without requests; the next request reopens it.
+
+In another terminal, seed objects (alpha, beta, and fake-1..fake-N; N defaults
+to 5). Seeding builds `bin/mdo` and runs `mdo create` for each ID. A new object
+starts with an empty database:
 
 ```sh
 make seed        # or: make seed N=10, ./scripts/seed.sh 10
-./bin/mdo create task-gamma
-./bin/mdo state task-alpha
-./bin/mdo claim task-alpha
-./bin/mdo finish task-alpha
+./bin/mdo create gamma
+./bin/mdo sql alpha 'CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)'
+./bin/mdo sql alpha 'INSERT INTO notes(body) VALUES(?)' hello
+./bin/mdo sql alpha 'SELECT * FROM notes WHERE id = ?' 1
 ```
 
+Each extra argument to `mdo sql` fills one `?` placeholder. An argument that is
+valid JSON (`42`, `true`, `null`, `'"quoted"'`) is sent as that value; anything
+else is sent as a string.
+
 The CLI prints JSON to stdout. HTTP and connection errors go to stderr and exit
-with status 1. A claim that loses the race returns `claimed: false` and exits
-successfully, matching the API.
+with status 1.
 
 ```sh
-./bin/mdo state task-alpha | jq -r '.status'
-./bin/mdo --server http://127.0.0.1:8787 state task-alpha
+./bin/mdo sql alpha 'SELECT body FROM notes' | jq -r '.rows[][0]'
+./bin/mdo --server http://127.0.0.1:8787 sql alpha 'SELECT 1'
 ./bin/mdo --help
 ```
 
-To try rollback, claim a pending task, then run:
+`create` is the only command that makes a new object; `sql` returns 404 for an
+unknown ID. Creating an existing object keeps its data.
 
-```sh
-./bin/mdo finish task-alpha --fail
-./bin/mdo state task-alpha   # still running
-./bin/mdo finish task-alpha  # commits completion and its event
-```
+### What SQL is allowed
 
-`create` is the only command that makes a new object; the others return 404 for
-an unknown ID. Use a fresh ID for a new pending task; creating an existing
-object preserves its status.
+Each request runs in its own transaction, so if any statement fails, none of
+them stick. SQLite's authorizer checks every action while it prepares the SQL
+(see `internal/store/query.go`):
+
+- Allowed: reads, inserts, updates, deletes, and creating, altering, or
+  dropping tables and indexes.
+- Rejected: `PRAGMA`, `ATTACH`, `BEGIN`/`COMMIT`, triggers, views, virtual
+  tables, and temp objects.
+
+Results are limited to 100 rows, and each request has a 2-second time limit.
 
 ## API contract and client generation
 
@@ -53,9 +63,7 @@ OpenAPI tools. The routes are:
 | CLI | HTTP operation |
 | --- | --- |
 | `mdo create ID` | `POST /objects/{id}` |
-| `mdo state ID` | `GET /objects/{id}` |
-| `mdo claim ID` | `POST /objects/{id}/claim` |
-| `mdo finish ID [--fail]` | `POST /objects/{id}/finish[?fail=true]` |
+| `mdo sql ID SQL [PARAM...]` | `POST /objects/{id}/sql` |
 
 The Go client is generated into `internal/apiclient/client.gen.go` using
 [api/client.yaml](api/client.yaml). The generator is pinned as a Go tool in
@@ -77,9 +85,8 @@ When changing the API:
 
 `make check` regenerates to a temporary file and fails if the checked-in client
 is stale, then runs gofmt, vet, and tests. Generated-client integration tests
-exercise requests and typed responses against the real HTTP handlers. Handler
-tests also verify concurrent claims and finish rollback. Do not edit `client.gen.go` by
-hand. To upgrade the generator deliberately, run:
+exercise requests and typed responses against the real HTTP handlers. Do not
+edit `client.gen.go` by hand. To upgrade the generator deliberately, run:
 
 ```sh
 go get -tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@VERSION

@@ -1,95 +1,61 @@
 openapi: 3.0.3
 info:
   title: Mini Durable Objects API
-  version: 0.1.0
-  description: Create objects, then read, claim, and finish their tasks. Each object has its own SQLite database.
+  version: 0.2.0
+  description: Create objects, then run SQL against them. Each object has its own SQLite database.
 servers:
   - url: http://127.0.0.1:8787
 paths:
   /objects/{id}:
     parameters:
       - $ref: '#/components/parameters/ObjectID'
-    get:
-      operationId: getState
-      summary: Read an existing object's task status
-      responses:
-        '200':
-          description: Current task state
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ObjectState'
-        '400':
-          $ref: '#/components/responses/InvalidID'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
     post:
       operationId: createObject
-      summary: Create an object with a pending task
-      description: Creates the object's database if needed. An existing object keeps its status.
+      summary: Create an object with an empty database
+      description: Creates the object's database if needed. An existing object keeps its data.
       responses:
         '200':
-          description: Current task state
+          description: The object
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ObjectState'
+                $ref: '#/components/schemas/Object'
         '400':
           $ref: '#/components/responses/InvalidID'
         '500':
           $ref: '#/components/responses/InternalError'
-  /objects/{id}/claim:
+  /objects/{id}/sql:
     parameters:
       - $ref: '#/components/parameters/ObjectID'
     post:
-      operationId: claimTask
-      summary: Atomically claim a pending task
-      description: Changes pending to running. Returns claimed=false if the task is already running or completed.
+      operationId: runSQL
+      summary: Run SQL against the object's database
+      description: >-
+        Runs in its own transaction. SQLite's authorizer allows reads, row writes,
+        and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH,
+        transactions, triggers, views, and temp objects are rejected.
+        Returns at most 100 rows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SQLRequest'
       responses:
         '200':
-          description: Claim result; only one competing request can return claimed=true
+          description: Result columns and rows
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ClaimResult'
+                $ref: '#/components/schemas/SQLResult'
         '400':
-          $ref: '#/components/responses/InvalidID'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
-  /objects/{id}/finish:
-    parameters:
-      - $ref: '#/components/parameters/ObjectID'
-    post:
-      operationId: finishTask
-      summary: Complete a running task and record its completion event atomically
-      parameters:
-        - name: fail
-          in: query
-          description: Set true to simulate failure before commit; both changes roll back.
-          schema:
-            type: boolean
-            default: false
-      responses:
-        '200':
-          description: Completed task state
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ObjectState'
-        '400':
-          $ref: '#/components/responses/InvalidID'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          description: Task is not running
+          description: Invalid object ID, invalid JSON, or bad query
           content:
             text/plain:
               schema:
                 type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 components:
@@ -105,23 +71,36 @@ components:
         minLength: 1
         maxLength: 40
   schemas:
-    ObjectState:
+    Object:
       type: object
-      required: [id, status]
+      required: [id]
       properties:
         id:
           type: string
-        status:
-          type: string
-          enum: [pending, running, completed]
-    ClaimResult:
+    SQLRequest:
       type: object
-      required: [id, claimed]
+      required: [sql]
       properties:
-        id:
+        sql:
           type: string
-        claimed:
-          type: boolean
+          description: Use ? placeholders for values.
+        params:
+          type: array
+          description: Values for the ? placeholders. Numbers must be 64-bit integers.
+          items: {}
+    SQLResult:
+      type: object
+      required: [columns, rows]
+      properties:
+        columns:
+          type: array
+          items:
+            type: string
+        rows:
+          type: array
+          items:
+            type: array
+            items: {}
   responses:
     InvalidID:
       description: Invalid object ID
@@ -136,7 +115,7 @@ components:
           schema:
             type: string
     InternalError:
-      description: Storage or database failure, or simulated failure during finish
+      description: Storage or database failure
       content:
         text/plain:
           schema:

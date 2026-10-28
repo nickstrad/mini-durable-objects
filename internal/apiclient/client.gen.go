@@ -4,6 +4,7 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,50 +16,31 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
-// Defines values for ObjectStateStatus.
-const (
-	Completed ObjectStateStatus = "completed"
-	Pending   ObjectStateStatus = "pending"
-	Running   ObjectStateStatus = "running"
-)
-
-// Valid indicates whether the value is a known member of the ObjectStateStatus enum.
-func (e ObjectStateStatus) Valid() bool {
-	switch e {
-	case Completed:
-		return true
-	case Pending:
-		return true
-	case Running:
-		return true
-	default:
-		return false
-	}
+// Object defines model for Object.
+type Object struct {
+	Id string `json:"id"`
 }
 
-// ClaimResult defines model for ClaimResult.
-type ClaimResult struct {
-	Claimed bool   `json:"claimed"`
-	Id      string `json:"id"`
+// SQLRequest defines model for SQLRequest.
+type SQLRequest struct {
+	// Params Values for the ? placeholders. Numbers must be 64-bit integers.
+	Params *[]interface{} `json:"params,omitempty"`
+
+	// Sql Use ? placeholders for values.
+	Sql string `json:"sql"`
 }
 
-// ObjectState defines model for ObjectState.
-type ObjectState struct {
-	Id     string            `json:"id"`
-	Status ObjectStateStatus `json:"status"`
+// SQLResult defines model for SQLResult.
+type SQLResult struct {
+	Columns []string        `json:"columns"`
+	Rows    [][]interface{} `json:"rows"`
 }
-
-// ObjectStateStatus defines model for ObjectState.Status.
-type ObjectStateStatus string
 
 // ObjectID defines model for ObjectID.
 type ObjectID = string
 
-// FinishTaskParams defines parameters for FinishTask.
-type FinishTaskParams struct {
-	// Fail Set true to simulate failure before commit; both changes roll back.
-	Fail *bool `form:"fail,omitempty" json:"fail,omitempty"`
-}
+// RunSQLJSONRequestBody defines body for RunSQL for application/json ContentType.
+type RunSQLJSONRequestBody = SQLRequest
 
 // RequestEditorFn is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -134,49 +116,35 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 // The interface specification for the client above.
 type ClientInterface interface {
 
-	// GetState Read an existing object's task status
+	// CreateObject Create an object with an empty database
 	//
-	// Corresponds with GET /objects/{id} (the `GetState` operationId).
-	GetState(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// CreateObject Create an object with a pending task
-	//
-	// Creates the object's database if needed. An existing object keeps its status.
+	// Creates the object's database if needed. An existing object keeps its data.
 	//
 	// Corresponds with POST /objects/{id} (the `CreateObject` operationId).
 	CreateObject(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ClaimTask Atomically claim a pending task
+	// RunSQLWithBody Run SQL against the object's database
 	//
-	// Changes pending to running. Returns claimed=false if the task is already running or completed.
+	// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 	//
-	// Corresponds with POST /objects/{id}/claim (the `ClaimTask` operationId).
-	ClaimTask(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+	RunSQLWithBody(ctx context.Context, id ObjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// FinishTask Complete a running task and record its completion event atomically
+	// RunSQL Run SQL against the object's database
 	//
-	// Corresponds with POST /objects/{id}/finish (the `FinishTask` operationId).
-	FinishTask(ctx context.Context, id ObjectID, params *FinishTaskParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+	RunSQL(ctx context.Context, id ObjectID, body RunSQLJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
 
-// GetState Read an existing object's task status
+// CreateObject Create an object with an empty database
 //
-// Corresponds with GET /objects/{id} (the `GetState` operationId).
-func (c *Client) GetState(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetStateRequest(c.Server, id)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// CreateObject Create an object with a pending task
-//
-// Creates the object's database if needed. An existing object keeps its status.
+// Creates the object's database if needed. An existing object keeps its data.
 //
 // Corresponds with POST /objects/{id} (the `CreateObject` operationId).
 func (c *Client) CreateObject(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -191,13 +159,15 @@ func (c *Client) CreateObject(ctx context.Context, id ObjectID, reqEditors ...Re
 	return c.Client.Do(req)
 }
 
-// ClaimTask Atomically claim a pending task
+// RunSQLWithBody Run SQL against the object's database
 //
-// Changes pending to running. Returns claimed=false if the task is already running or completed.
+// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 //
-// Corresponds with POST /objects/{id}/claim (the `ClaimTask` operationId).
-func (c *Client) ClaimTask(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewClaimTaskRequest(c.Server, id)
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+func (c *Client) RunSQLWithBody(ctx context.Context, id ObjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunSQLRequestWithBody(c.Server, id, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -208,11 +178,15 @@ func (c *Client) ClaimTask(ctx context.Context, id ObjectID, reqEditors ...Reque
 	return c.Client.Do(req)
 }
 
-// FinishTask Complete a running task and record its completion event atomically
+// RunSQL Run SQL against the object's database
 //
-// Corresponds with POST /objects/{id}/finish (the `FinishTask` operationId).
-func (c *Client) FinishTask(ctx context.Context, id ObjectID, params *FinishTaskParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewFinishTaskRequest(c.Server, id, params)
+// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+func (c *Client) RunSQL(ctx context.Context, id ObjectID, body RunSQLJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunSQLRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -221,40 +195,6 @@ func (c *Client) FinishTask(ctx context.Context, id ObjectID, params *FinishTask
 		return nil, err
 	}
 	return c.Client.Do(req)
-}
-
-// NewGetStateRequest constructs an http.Request for the GetState method
-func NewGetStateRequest(server string, id ObjectID) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/objects/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
 }
 
 // NewCreateObjectRequest constructs an http.Request for the CreateObject method
@@ -291,42 +231,19 @@ func NewCreateObjectRequest(server string, id ObjectID) (*http.Request, error) {
 	return req, nil
 }
 
-// NewClaimTaskRequest constructs an http.Request for the ClaimTask method
-func NewClaimTaskRequest(server string, id ObjectID) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+// NewRunSQLRequest calls the generic RunSQL builder with application/json body
+func NewRunSQLRequest(server string, id ObjectID, body RunSQLJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/objects/%s/claim", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
+	bodyReader = bytes.NewReader(buf)
+	return NewRunSQLRequestWithBody(server, id, "application/json", bodyReader)
 }
 
-// NewFinishTaskRequest constructs an http.Request for the FinishTask method
-func NewFinishTaskRequest(server string, id ObjectID, params *FinishTaskParams) (*http.Request, error) {
+// NewRunSQLRequestWithBody constructs an http.Request for the RunSQL method, with any body, and a specified content type
+func NewRunSQLRequestWithBody(server string, id ObjectID, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -341,7 +258,7 @@ func NewFinishTaskRequest(server string, id ObjectID, params *FinishTaskParams) 
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/objects/%s/finish", pathParam0)
+	operationPath := fmt.Sprintf("/objects/%s/sql", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -351,37 +268,12 @@ func NewFinishTaskRequest(server string, id ObjectID, params *FinishTaskParams) 
 		return nil, err
 	}
 
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.Fail != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "fail", *params.Fail, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -430,89 +322,43 @@ func WithBaseURL(baseURL string) ClientOption {
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
 
-	// GetStateWithResponse Read an existing object's task status
+	// CreateObjectWithResponse Create an object with an empty database
 	//
-	// Returns a wrapper object for the known response body format(s).
-	//
-	// Corresponds with GET /objects/{id} (the `GetState` operationId).
-	GetStateWithResponse(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*GetStateResponse, error)
-
-	// CreateObjectWithResponse Create an object with a pending task
-	//
-	// Creates the object's database if needed. An existing object keeps its status.
+	// Creates the object's database if needed. An existing object keeps its data.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /objects/{id} (the `CreateObject` operationId).
 	CreateObjectWithResponse(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*CreateObjectResponse, error)
 
-	// ClaimTaskWithResponse Atomically claim a pending task
+	// RunSQLWithBodyWithResponse Run SQL against the object's database
 	//
-	// Changes pending to running. Returns claimed=false if the task is already running or completed.
+	// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 	//
-	// Returns a wrapper object for the known response body format(s).
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
-	// Corresponds with POST /objects/{id}/claim (the `ClaimTask` operationId).
-	ClaimTaskWithResponse(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*ClaimTaskResponse, error)
+	// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+	RunSQLWithBodyWithResponse(ctx context.Context, id ObjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunSQLResponse, error)
 
-	// FinishTaskWithResponse Complete a running task and record its completion event atomically
+	// RunSQLWithResponse Run SQL against the object's database
 	//
-	// Returns a wrapper object for the known response body format(s).
+	// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 	//
-	// Corresponds with POST /objects/{id}/finish (the `FinishTask` operationId).
-	FinishTaskWithResponse(ctx context.Context, id ObjectID, params *FinishTaskParams, reqEditors ...RequestEditorFn) (*FinishTaskResponse, error)
-}
-
-type GetStateResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *ObjectState
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r GetStateResponse) GetJSON200() *ObjectState {
-	return r.JSON200
-}
-
-// GetBody returns the raw response body bytes
-func (r GetStateResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r GetStateResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetStateResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r GetStateResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+	RunSQLWithResponse(ctx context.Context, id ObjectID, body RunSQLJSONRequestBody, reqEditors ...RequestEditorFn) (*RunSQLResponse, error)
 }
 
 type CreateObjectResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *ObjectState
+	JSON200 *Object
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r CreateObjectResponse) GetJSON200() *ObjectState {
+func (r CreateObjectResponse) GetJSON200() *Object {
 	return r.JSON200
 }
 
@@ -545,25 +391,25 @@ func (r CreateObjectResponse) ContentType() string {
 	return ""
 }
 
-type ClaimTaskResponse struct {
+type RunSQLResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *ClaimResult
+	JSON200 *SQLResult
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r ClaimTaskResponse) GetJSON200() *ClaimResult {
+func (r RunSQLResponse) GetJSON200() *SQLResult {
 	return r.JSON200
 }
 
 // GetBody returns the raw response body bytes
-func (r ClaimTaskResponse) GetBody() []byte {
+func (r RunSQLResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r ClaimTaskResponse) Status() string {
+func (r RunSQLResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -571,7 +417,7 @@ func (r ClaimTaskResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r ClaimTaskResponse) StatusCode() int {
+func (r RunSQLResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -579,70 +425,16 @@ func (r ClaimTaskResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r ClaimTaskResponse) ContentType() string {
+func (r RunSQLResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type FinishTaskResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *ObjectState
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r FinishTaskResponse) GetJSON200() *ObjectState {
-	return r.JSON200
-}
-
-// GetBody returns the raw response body bytes
-func (r FinishTaskResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r FinishTaskResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r FinishTaskResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r FinishTaskResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-// GetStateWithResponse Read an existing object's task status
+// CreateObjectWithResponse Create an object with an empty database
 //
-// Returns a wrapper object for the known response body format(s).
-//
-// Corresponds with GET /objects/{id} (the `GetState` operationId).
-func (c *ClientWithResponses) GetStateWithResponse(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*GetStateResponse, error) {
-	rsp, err := c.GetState(ctx, id, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetStateResponse(rsp)
-}
-
-// CreateObjectWithResponse Create an object with a pending task
-//
-// Creates the object's database if needed. An existing object keeps its status.
+// Creates the object's database if needed. An existing object keeps its data.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -655,58 +447,34 @@ func (c *ClientWithResponses) CreateObjectWithResponse(ctx context.Context, id O
 	return ParseCreateObjectResponse(rsp)
 }
 
-// ClaimTaskWithResponse Atomically claim a pending task
+// RunSQLWithBodyWithResponse Run SQL against the object's database
 //
-// Changes pending to running. Returns claimed=false if the task is already running or completed.
+// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 //
-// Returns a wrapper object for the known response body format(s).
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
-// Corresponds with POST /objects/{id}/claim (the `ClaimTask` operationId).
-func (c *ClientWithResponses) ClaimTaskWithResponse(ctx context.Context, id ObjectID, reqEditors ...RequestEditorFn) (*ClaimTaskResponse, error) {
-	rsp, err := c.ClaimTask(ctx, id, reqEditors...)
+// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+func (c *ClientWithResponses) RunSQLWithBodyWithResponse(ctx context.Context, id ObjectID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunSQLResponse, error) {
+	rsp, err := c.RunSQLWithBody(ctx, id, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseClaimTaskResponse(rsp)
+	return ParseRunSQLResponse(rsp)
 }
 
-// FinishTaskWithResponse Complete a running task and record its completion event atomically
+// RunSQLWithResponse Run SQL against the object's database
 //
-// Returns a wrapper object for the known response body format(s).
+// Runs in its own transaction. SQLite's authorizer allows reads, row writes, and creating, altering, or dropping tables and indexes; PRAGMA, ATTACH, transactions, triggers, views, and temp objects are rejected. Returns at most 100 rows.
 //
-// Corresponds with POST /objects/{id}/finish (the `FinishTask` operationId).
-func (c *ClientWithResponses) FinishTaskWithResponse(ctx context.Context, id ObjectID, params *FinishTaskParams, reqEditors ...RequestEditorFn) (*FinishTaskResponse, error) {
-	rsp, err := c.FinishTask(ctx, id, params, reqEditors...)
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /objects/{id}/sql (the `RunSQL` operationId).
+func (c *ClientWithResponses) RunSQLWithResponse(ctx context.Context, id ObjectID, body RunSQLJSONRequestBody, reqEditors ...RequestEditorFn) (*RunSQLResponse, error) {
+	rsp, err := c.RunSQL(ctx, id, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseFinishTaskResponse(rsp)
-}
-
-// ParseGetStateResponse parses an HTTP response from a GetStateWithResponse call
-func ParseGetStateResponse(rsp *http.Response) (*GetStateResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetStateResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ObjectState
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	}
-
-	return response, nil
+	return ParseRunSQLResponse(rsp)
 }
 
 // ParseCreateObjectResponse parses an HTTP response from a CreateObjectWithResponse call
@@ -724,7 +492,7 @@ func ParseCreateObjectResponse(rsp *http.Response) (*CreateObjectResponse, error
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ObjectState
+		var dest Object
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -735,48 +503,22 @@ func ParseCreateObjectResponse(rsp *http.Response) (*CreateObjectResponse, error
 	return response, nil
 }
 
-// ParseClaimTaskResponse parses an HTTP response from a ClaimTaskWithResponse call
-func ParseClaimTaskResponse(rsp *http.Response) (*ClaimTaskResponse, error) {
+// ParseRunSQLResponse parses an HTTP response from a RunSQLWithResponse call
+func ParseRunSQLResponse(rsp *http.Response) (*RunSQLResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &ClaimTaskResponse{
+	response := &RunSQLResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ClaimResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseFinishTaskResponse parses an HTTP response from a FinishTaskWithResponse call
-func ParseFinishTaskResponse(rsp *http.Response) (*FinishTaskResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &FinishTaskResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ObjectState
+		var dest SQLResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

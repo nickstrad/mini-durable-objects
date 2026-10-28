@@ -1,6 +1,6 @@
 #!/bin/sh
-# Create task-alpha, task-beta, and COUNT fake objects (default 5)
-# through the running API server (make start). Existing objects keep their status.
+# Create alpha, beta, and COUNT fake objects (default 5) through the running
+# API server (make start). Existing objects keep their data.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -12,7 +12,7 @@ case "$count" in
     ;;
 esac
 
-ids='task-alpha task-beta'
+ids='alpha beta'
 i=1
 while [ "$i" -le "$count" ]; do
   ids="$ids fake-$i"

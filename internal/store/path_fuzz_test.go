@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// FuzzObjectPath checks the lesson 1 security boundary: an object ID becomes a
+// FuzzObjectPath checks the store's security boundary: an object ID becomes a
 // directory name, so path must never let an ID escape the store directory.
 func FuzzObjectPath(f *testing.F) {
 	seeds := []string{
-		"a", "task-1", "0", "a-b-c",
+		"a", "obj-1", "0", "a-b-c",
 		strings.Repeat("a", 40), strings.Repeat("a", 41),
 		"", "..", ".", "../x", "x/..", "a/b", "/a", `a\b`, "A", "aB", "-a", "a\x00", "a\n", "\na",
 		"a b", "a.b", "a_b",
@@ -28,7 +29,7 @@ func FuzzObjectPath(f *testing.F) {
 	}
 
 	dir := filepath.Join(f.TempDir(), "objects")
-	s := NewSQLite(dir)
+	s := NewSQLite(dir, time.Minute)
 
 	f.Fuzz(func(t *testing.T, id string) {
 		got, err := s.path(id)

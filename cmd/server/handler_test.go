@@ -1,150 +1,121 @@
 package main
 
 import (
-	"database/sql"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nickstrad/mini-durable-objects/internal/store"
 )
 
-func testObject(t *testing.T) (http.Handler, *sql.DB) {
+// testObject returns a router whose store holds one object, "alpha", with a
+// notes table.
+func testObject(t *testing.T) http.Handler {
 	t.Helper()
-	dir := t.TempDir()
-	h := newRouter(store.NewSQLite(dir))
-	if w := request(h, "POST", "/objects/task-alpha"); w.Code != 200 {
+	h := newRouter(store.NewSQLite(t.TempDir(), time.Minute))
+	if w := request(h, "POST", "/objects/alpha", ""); w.Code != 200 {
 		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "task-alpha", "state.sqlite"))
-	if err != nil {
-		t.Fatal(err)
+	if w := request(h, "POST", "/objects/alpha/sql", `{"sql":"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}`); w.Code != 200 {
+		t.Fatalf("create table: got %d: %s", w.Code, w.Body.String())
 	}
-	t.Cleanup(func() { db.Close() })
-	return h, db
+	return h
 }
 
-func request(h http.Handler, method, path string) *httptest.ResponseRecorder {
+func request(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+	h.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
 	return w
 }
 
-func assertStored(t *testing.T, db *sql.DB, wantStatus string, wantEvents int) {
-	t.Helper()
-	var status string
-	var events int
-	if err := db.QueryRow("SELECT status FROM task WHERE id=1").Scan(&status); err != nil {
-		t.Fatal(err)
+func TestCreate(t *testing.T) {
+	h := testObject(t)
+	request(h, "POST", "/objects/alpha/sql", `{"sql":"INSERT INTO notes(body) VALUES('kept')"}`)
+	// Creating an existing object keeps its data.
+	if w := request(h, "POST", "/objects/alpha", ""); w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"id":"alpha"}` {
+		t.Fatalf("create existing: got %d: %s", w.Code, w.Body.String())
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
-		t.Fatal(err)
+	if w := request(h, "POST", "/objects/alpha/sql", `{"sql":"SELECT body FROM notes"}`); !strings.Contains(w.Body.String(), `"kept"`) {
+		t.Fatalf("data lost: %s", w.Body.String())
 	}
-	if status != wantStatus || events != wantEvents {
-		t.Fatalf("stored status=%q events=%d; want %q %d", status, events, wantStatus, wantEvents)
-	}
-}
-
-func TestTaskLifecycle(t *testing.T) {
-	h, db := testObject(t)
-	for _, step := range []struct {
-		method, path string
-		code         int
-		status       string
-		events       int
-	}{
-		{"GET", "/objects/task-alpha", 200, "pending", 0},
-		{"POST", "/objects/task-alpha/finish", 409, "pending", 0},
-		{"POST", "/objects/task-alpha/claim", 200, "running", 0},
-		{"POST", "/objects/task-alpha/finish?fail=true", 500, "running", 0},
-		{"POST", "/objects/task-alpha/finish", 200, "completed", 1},
-		{"POST", "/objects/task-alpha/finish", 409, "completed", 1},
-	} {
-		w := request(h, step.method, step.path)
-		if w.Code != step.code {
-			t.Fatalf("%s %s: got %d: %s", step.method, step.path, w.Code, w.Body.String())
-		}
-		assertStored(t, db, step.status, step.events)
-	}
-	w := request(h, "GET", "/objects/task-alpha")
-	var state ObjectState
-	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.ID != "task-alpha" || state.Status != "completed" {
-		t.Fatalf("unexpected state: %+v", state)
-	}
-}
-
-func TestConcurrentClaims(t *testing.T) {
-	h, db := testObject(t)
-	var wg sync.WaitGroup
-	results := make(chan *httptest.ResponseRecorder, 8)
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results <- request(h, "POST", "/objects/task-alpha/claim")
-		}()
-	}
-	wg.Wait()
-	close(results)
-	winners := 0
-	for w := range results {
-		if w.Code != 200 {
-			t.Fatalf("claim: %d %s", w.Code, w.Body.String())
-		}
-		var result struct {
-			Claimed bool `json:"claimed"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-			t.Fatal(err)
-		}
-		if result.Claimed {
-			winners++
-		}
-	}
-	if winners != 1 {
-		t.Fatalf("got %d successful claims; want 1", winners)
-	}
-	assertStored(t, db, "running", 0)
 }
 
 func TestRouteErrors(t *testing.T) {
-	h, db := testObject(t)
-	for _, route := range []struct{ method, action string }{{"GET", ""}, {"POST", "/claim"}, {"POST", "/finish"}} {
-		for _, tc := range []struct {
-			id   string
-			code int
-		}{{"missing", 404}, {"INVALID", 400}} {
-			w := request(h, route.method, "/objects/"+tc.id+route.action)
-			if w.Code != tc.code {
-				t.Fatalf("%s: got %d; want %d", tc.id+route.action, w.Code, tc.code)
-			}
+	h := testObject(t)
+	for _, tc := range []struct {
+		method, path string
+		code         int
+	}{
+		{"POST", "/objects/INVALID", 400},
+		{"POST", "/objects/INVALID/sql", 400},
+		{"POST", "/objects/missing/sql", 404},
+		{"GET", "/objects/alpha", 405},
+		{"GET", "/objects/alpha/sql", 405},
+	} {
+		if w := request(h, tc.method, tc.path, `{"sql":"SELECT 1"}`); w.Code != tc.code {
+			t.Errorf("%s %s: got %d; want %d", tc.method, tc.path, w.Code, tc.code)
 		}
 	}
-	if w := request(h, "GET", "/objects/task-alpha/claim"); w.Code != 405 {
-		t.Fatalf("GET claim: got %d", w.Code)
-	}
-	assertStored(t, db, "pending", 0)
 }
 
-func TestCreateKeepsExistingStatus(t *testing.T) {
-	h, db := testObject(t)
-	request(h, "POST", "/objects/task-alpha/claim")
-	w := request(h, "POST", "/objects/task-alpha")
-	var state ObjectState
-	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
+func TestSQLRoute(t *testing.T) {
+	h := testObject(t)
+	run := func(body string) *httptest.ResponseRecorder {
+		return request(h, "POST", "/objects/alpha/sql", body)
 	}
-	if w.Code != 200 || state.Status != "running" {
-		t.Fatalf("create existing: %d %+v", w.Code, state)
+
+	if w := run(`{"sql":"INSERT INTO notes(body) VALUES(?)","params":["note"]}`); w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"columns":[],"rows":[]}` {
+		t.Fatalf("insert: got %d: %s", w.Code, w.Body.String())
 	}
-	if w := request(h, "POST", "/objects/INVALID"); w.Code != 400 {
-		t.Fatalf("create invalid: got %d", w.Code)
+	w := run(`{"sql":"SELECT id, body FROM notes WHERE id = ?","params":[1]}`)
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"columns":["id","body"],"rows":[[1,"note"]]}` {
+		t.Fatalf("select: got %d: %s", w.Code, w.Body.String())
 	}
-	assertStored(t, db, "running", 0)
+
+	// Clients manage their own tables and indexes.
+	for _, body := range []string{
+		`{"sql":"CREATE TABLE scratch (x)"}`,
+		`{"sql":"CREATE INDEX scratch_x ON scratch(x)"}`,
+		`{"sql":"ALTER TABLE scratch ADD COLUMN y"}`,
+		`{"sql":"DROP INDEX scratch_x"}`,
+		`{"sql":"DROP TABLE scratch"}`,
+	} {
+		if w := run(body); w.Code != 200 {
+			t.Errorf("%s: got %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+
+	for _, body := range []string{
+		`not json`,
+		// The authorizer rejects these while SQLite prepares them.
+		`{"sql":"PRAGMA query_only=0"}`,
+		`{"sql":"ATTACH DATABASE '/tmp/other.db' AS other"}`,
+		`{"sql":"COMMIT"}`,
+		`{"sql":"CREATE TEMP TABLE t(x)"}`,
+		`{"sql":"CREATE VIEW v AS SELECT 1"}`,
+		`{"sql":"CREATE TRIGGER tr AFTER INSERT ON notes BEGIN DELETE FROM notes; END"}`,
+		// SQLite itself refuses this one.
+		`{"sql":"UPDATE sqlite_master SET sql=''"}`,
+		`{"sql":"SELECT * FROM missing_table"}`,
+		`{"sql":"SELECT ?","params":[1.5]}`,
+		`{"sql":"SELECT i FROM (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n) SELECT i FROM n LIMIT 101)"}`,
+	} {
+		if w := run(body); w.Code != 400 {
+			t.Errorf("%s: got %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+	// A rejected statement after an allowed one rolls both back.
+	if w := run(`{"sql":"INSERT INTO notes(body) VALUES('x'); PRAGMA query_only=0"}`); w.Code != 400 {
+		t.Fatalf("multi: got %d", w.Code)
+	}
+	// SQLite parses the SQL, so ';' inside a string is fine.
+	w = run(`{"sql":"WITH n(i) AS (SELECT 1) SELECT i, 'a;b' FROM n, notes"}`)
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"columns":["i","'a;b'"],"rows":[[1,"a;b"]]}` {
+		t.Fatalf("with: got %d: %s", w.Code, w.Body.String())
+	}
+	if w := run(`{"sql":"SELECT 1 FROM notes WHERE 0"}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"rows":[]`) {
+		t.Fatalf("empty select: got %d: %s", w.Code, w.Body.String())
+	}
 }

@@ -1,5 +1,5 @@
-// Package store keeps each object's task state. The HTTP server talks to the
-// Store interface; adapters (SQLite first) decide how state is persisted.
+// Package store gives each object its own database. The HTTP server talks to
+// the Store interface; adapters (SQLite first) decide how state is persisted.
 package store
 
 import (
@@ -8,26 +8,28 @@ import (
 	"regexp"
 )
 
-// Store is the set of task operations the API needs. Status is one of
-// "pending", "running", or "completed".
+// Store is the set of object operations the API needs.
 type Store interface {
-	// Create makes the object with a pending task. An existing object keeps its status.
-	Create(ctx context.Context, id string) (status string, err error)
-	// State reads the task status of an existing object.
-	State(ctx context.Context, id string) (status string, err error)
-	// Claim moves a pending task to running. Only one concurrent caller gets true.
-	Claim(ctx context.Context, id string) (claimed bool, err error)
-	// Finish completes a running task and records its event, atomically.
-	// failBeforeCommit rolls both changes back to demonstrate atomicity.
-	Finish(ctx context.Context, id string, failBeforeCommit bool) error
+	// Create makes the object's empty database. Creating an existing object
+	// leaves its data alone.
+	Create(ctx context.Context, id string) error
+	// Query runs client SQL against an existing object in its own transaction.
+	// SQLite's authorizer limits what it may do (see authorizeQuery).
+	// Bad statements and SQL errors return ErrBadQuery.
+	Query(ctx context.Context, id, query string, params []any) (QueryResult, error)
 }
 
 var (
-	ErrInvalidID        = errors.New("invalid object ID")
-	ErrNotFound         = errors.New("object not found")
-	ErrNotRunning       = errors.New("task is not running")
-	ErrSimulatedFailure = errors.New("simulated failure before commit")
+	ErrInvalidID = errors.New("invalid object ID")
+	ErrNotFound  = errors.New("object not found")
+	ErrBadQuery  = errors.New("bad query")
 )
+
+// QueryResult is the column names and rows a Query returned.
+type QueryResult struct {
+	Columns []string `json:"columns"`
+	Rows    [][]any  `json:"rows"`
+}
 
 // Object IDs become directory names, so the store only accepts safe ones.
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
